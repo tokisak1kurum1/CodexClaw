@@ -7,7 +7,7 @@ use crate::{
     codex::{
         app_server::{
             AppServerHandle, TurnPolicy,
-            protocol::{ApprovalPolicy, ApprovalsReviewer},
+            protocol::{ApprovalPolicy, ApprovalsReviewer, SandboxPolicy},
         },
         types::{CompactRequest, ExecutionRequest, ExecutionResult, ExecutionUpdate},
     },
@@ -55,28 +55,43 @@ impl CodexExecutor {
 
 /// Given an [`ExecutionRequest`], pick the appropriate turn policy.
 ///
-/// We avoid overriding anything we don't need to: approval_policy and
-/// sandbox_policy default to `None` which means the app-server uses whatever
-/// is in `~/.codex-claw/.codex/config.toml` (`sandbox_mode`, `approval_policy`,
-/// and the `sandbox_workspace_write.*` knobs like `network_access`,
-/// `exclude_slash_tmp`, `writable_roots`, etc.).
+/// Approval policy stays user/config driven. Filesystem sandboxing is fixed to
+/// workspace-write for every normal QQ turn with only that user's workspace/inbox
+/// roots; this also resets a thread after a read-only plan turn.
 ///
-/// We only override when:
+/// We only override the per-turn policy when:
 /// - plan mode is active → force `ReadOnly` + `Never` approvals + Plan collab;
 /// - the user explicitly set an approval override via `/approvals`.
 fn build_turn_policy(request: &ExecutionRequest) -> TurnPolicy {
     if request.session_state.settings.plan_mode {
         return TurnPolicy::plan_mode();
     }
-    if let Some(setting) = request.session_state.settings.approval_policy_override {
-        return match setting {
+    let mut policy = if let Some(setting) = request.session_state.settings.approval_policy_override {
+        match setting {
             ApprovalPolicySetting::GuardianSubagent => {
                 TurnPolicy::with_approvals_reviewer(ApprovalsReviewer::GuardianSubagent)
             }
             _ => TurnPolicy::with_approval_policy(approval_setting_to_protocol(setting)),
-        };
+        }
+    } else {
+        TurnPolicy::inherit_from_config()
+    };
+    let mut roots = request
+        .add_dirs
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    let cwd = request.workspace_dir.to_string_lossy().into_owned();
+    if !roots.contains(&cwd) {
+        roots.push(cwd);
     }
-    TurnPolicy::inherit_from_config()
+    policy.sandbox_policy = Some(SandboxPolicy::WorkspaceWrite {
+        writable_roots: roots,
+        network_access: true,
+        exclude_tmpdir_env_var: false,
+        exclude_slash_tmp: false,
+    });
+    policy
 }
 
 fn approval_setting_to_protocol(setting: ApprovalPolicySetting) -> ApprovalPolicy {
@@ -118,6 +133,31 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::codex::executor::build_codex_path_env;
+
+    #[test]
+    fn normal_turn_policy_is_workspace_write() {
+        let request = crate::codex::types::ExecutionRequest {
+            prompt: String::new(),
+            workspace_dir: std::path::PathBuf::from("/tmp/user/workspace"),
+            codex_home: std::path::PathBuf::from("/tmp/codex"),
+            config_overrides: Vec::new(),
+            add_dirs: vec![std::path::PathBuf::from("/tmp/user/inbox")],
+            session_state: Default::default(),
+            model: None,
+            service_tier: None,
+            context_mode: None,
+            reasoning_effort: crate::model::settings::ReasoningEffort::Medium,
+            image_paths: Vec::new(),
+            developer_instructions: None,
+            ephemeral: false,
+            owner_user_id: Some("a".into()),
+        };
+        let policy = super::build_turn_policy(&request);
+        assert!(matches!(
+            policy.sandbox_policy,
+            Some(crate::codex::app_server::protocol::SandboxPolicy::WorkspaceWrite { .. })
+        ));
+    }
 
     #[test]
     fn path_env_includes_home_bin_fallbacks() {

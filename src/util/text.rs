@@ -16,6 +16,7 @@ pub(crate) fn truncate_with_marker(value: &str, max_chars: usize, marker: &str) 
 /// Keep the first and last `max_chars / 2` characters, replacing the middle
 /// with a note about how much was dropped. Used for log bodies, where both the
 /// beginning (what ran) and the end (how it failed) matter.
+#[cfg(test)]
 pub(crate) fn truncate_middle(value: &str, max_chars: usize) -> String {
     let count = value.chars().count();
     if count <= max_chars {
@@ -86,6 +87,7 @@ pub(crate) fn extract_json_block(raw: &str) -> String {
 /// Remove every occurrence of an end-of-interaction `signal` token from `text`,
 /// reporting whether it was present at all. Standalone lines holding only the
 /// token are dropped entirely; inline occurrences are spliced out.
+#[cfg(test)]
 pub(crate) fn strip_end_signal(text: &str, signal: &str) -> (String, bool) {
     if !text.contains(signal) {
         return (text.to_string(), false);

@@ -1,100 +1,38 @@
-//! The gateway-facing application layer: `App` owns the shared runtime state
-//! (session store, QQ client, codex executor, busy slot) and its submodules
-//! implement the message and turn flows.
-//!
-//! - [`inbound`]: normalize incoming QQ events and dispatch command outcomes
-//! - [`turn`]: `run_turn` phases plus the `/compact` and `/self-update` flows
-//! - [`approvals`]: server-initiated approval routing and prompts
-//! - [`format`]: pure formatting helpers
-
+mod active_turns;
 mod approvals;
 mod format;
 mod inbound;
 mod turn;
-
-use std::{
-    collections::{HashMap, VecDeque},
-    path::PathBuf,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-};
-
-use anyhow::Result;
-use tokio::sync::{Mutex, oneshot};
-use tracing::info;
-
 use crate::{
     codex::{ApprovalOutcome, CodexExecutor},
     config::AppConfig,
-    memory::store::MemoryStore,
-    message::IncomingMessage,
+    memory::MemoryStore,
     qq::{Directive, QqApiClient},
-    scheduler::{ProactiveNotifier, SchedulerCtx},
     session::SessionStore,
-    shadow::ShadowWorker,
+    state::StateDb,
+    work_queue::WorkQueue,
 };
-
-/// `QqApiClient` is the production notifier behind the scheduler's
-/// [`ProactiveNotifier`] seam; the impl lives here (not in `qq/` or
-/// `scheduler/`) so neither of those modules depends on the other.
-impl ProactiveNotifier for QqApiClient {
-    fn send_markdown_proactive<'a>(
-        &'a self,
-        openid: &'a str,
-        text: &'a str,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
-        Box::pin(QqApiClient::send_markdown_proactive(self, openid, text))
-    }
-}
-
+use active_turns::ActiveTurns;
+use anyhow::Result;
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::Arc,
+};
+use tokio::sync::{Mutex, oneshot};
 pub struct App {
     pub config: AppConfig,
     pub(crate) session: Arc<SessionStore>,
     pub qq_client: Arc<QqApiClient>,
     pub codex: Arc<CodexExecutor>,
     pub(crate) memory: Arc<MemoryStore>,
-    pub(crate) shadow: Option<Arc<ShadowWorker>>,
-    /// The scheduler's slice of the app. The `App` holds the only strong
-    /// reference (the tick loop keeps a `Weak`), so dropping the `App` still
-    /// parks the scheduler exactly as when it held `Weak<App>` directly.
-    pub(crate) scheduler_ctx: Arc<SchedulerCtx>,
-    /// Parsed once from `general.timezone` (validated at config load).
-    pub(crate) display_tz: chrono_tz::Tz,
-    busy: AtomicBool,
-    active_turn: Mutex<Option<oneshot::Sender<()>>>,
-    /// The QQ openid whose turn currently holds `busy`. Used to route
-    /// server-initiated approval requests to the right user.
-    active_openid: Mutex<Option<ActiveTurnContext>>,
-    /// Queued approval decisions awaiting user reply. FIFO per openid.
+    pub state: StateDb,
+    pub work_queue: WorkQueue,
+    pub(crate) active_turns: Mutex<ActiveTurns>,
     pending_approvals: Mutex<HashMap<String, VecDeque<PendingApprovalEntry>>>,
-    pending_resume_messages: Mutex<HashMap<String, IncomingMessage>>,
 }
-
-#[derive(Clone)]
-struct ActiveTurnContext {
-    openid: String,
-    reply_message_id: String,
-}
-
 enum PendingApprovalEntry {
     Outcome(oneshot::Sender<ApprovalOutcome>),
 }
-
-/// RAII ownership of the singleton `App::busy` slot: dropping the guard
-/// releases the slot, so every early-return and panic path unwinds it without
-/// a hand-written `store(false)`. Acquired via [`App::try_acquire_busy`].
-struct BusyGuard<'a> {
-    busy: &'a AtomicBool,
-}
-
-impl Drop for BusyGuard<'_> {
-    fn drop(&mut self) {
-        self.busy.store(false, Ordering::SeqCst);
-    }
-}
-
 impl App {
     pub fn new(
         config: AppConfig,
@@ -102,101 +40,76 @@ impl App {
         qq_client: Arc<QqApiClient>,
         codex: Arc<CodexExecutor>,
         memory: Arc<MemoryStore>,
-        shadow: Option<Arc<ShadowWorker>>,
-        scheduler_ctx: Arc<SchedulerCtx>,
+        work_queue: WorkQueue,
     ) -> Arc<Self> {
-        let display_tz = config
-            .general
-            .timezone
-            .parse::<chrono_tz::Tz>()
-            .unwrap_or(chrono_tz::Asia::Shanghai);
+        let state = session.db.clone();
         let app = Arc::new(Self {
             config,
             session,
             qq_client,
             codex,
             memory,
-            shadow,
-            scheduler_ctx,
-            display_tz,
-            busy: AtomicBool::new(false),
-            active_turn: Mutex::new(None),
-            active_openid: Mutex::new(None),
+            state,
+            work_queue,
+            active_turns: Mutex::new(ActiveTurns::default()),
             pending_approvals: Mutex::new(HashMap::new()),
-            pending_resume_messages: Mutex::new(HashMap::new()),
         });
         app.clone().install_approval_handler();
         app
     }
-
-    /// Try to reserve the singleton busy slot (one turn at a time across all
-    /// users). Returns `None` when another turn already holds it; the caller
-    /// should report "busy" to the user and bail.
-    fn try_acquire_busy(&self) -> Option<BusyGuard<'_>> {
-        if self.busy.swap(true, Ordering::SeqCst) {
-            None
+    pub(crate) async fn command_locale(&self, user: &str) -> String {
+        self.session.command_locale(user).await
+    }
+    async fn reply_text(&self, user: &str, message: &str, text: &str) -> Result<()> {
+        let locale = self.command_locale(user).await;
+        let text = if locale == "zh" {
+            match text {
+                "stopped" => "已停止",
+                "interrupted" => "已中断",
+                "new conversation" => "已新建会话",
+                "approval resolved" => "已处理审批",
+                "no pending approval" => "当前没有待处理的审批",
+                "conversation compacted" => "会话已压缩",
+                "conversation resumed" => "会话已恢复",
+                "model updated" => "模型已更新",
+                "reasoning updated" => "思考强度已更新",
+                "service tier updated" => "快速模式已更新",
+                "context updated" => "上下文设置已更新",
+                "language updated" => "语言已更新",
+                "updated" => "设置已更新",
+                "saved" => "已保存",
+                "renamed" => "已重命名",
+                "cancelled" => "已取消",
+                other => other,
+            }
         } else {
-            Some(BusyGuard { busy: &self.busy })
-        }
-    }
-
-    fn runtime_profile_path(&self) -> PathBuf {
-        let codex_home = &self.config.general.codex_home_global;
-        codex_home.join("config.toml")
-    }
-
-    /// Resolve a user's UI language, falling back to the canonical default when
-    /// they have no session record yet. Shared by command handlers and the
-    /// scheduler so locale resolution stays consistent in one place.
-    pub(crate) async fn command_locale(&self, openid: &str) -> String {
-        self.session.command_locale(openid).await
-    }
-
-    /// Reply to `message_id` from `openid` with `text`, quoting the original
-    /// message — the reply shape every user-facing message in this file uses.
-    async fn reply_text(&self, openid: &str, message_id: &str, text: &str) -> Result<()> {
+            text
+        };
         self.qq_client
-            .send_text(openid, message_id, text, Some(message_id))
+            .send_text(user, message, text)
             .await
     }
-
-    async fn install_active_turn(&self) -> oneshot::Receiver<()> {
-        let (tx, rx) = oneshot::channel();
-        *self.active_turn.lock().await = Some(tx);
-        rx
+    async fn send_directive(&self, user: &str, message: &str, d: Directive) -> Result<()> {
+        let (path, name, kind) = match d {
+            Directive::Image { path } => (path, None, 1),
+            Directive::File { path, name } => (path, name, 4),
+        };
+        let root = self.session.user_root(user);
+        let canonical = std::fs::canonicalize(&path)?;
+        anyhow::ensure!(
+            canonical.starts_with(std::fs::canonicalize(root)?),
+            "attachment is outside this user's directories"
+        );
+        let uploaded = self
+            .qq_client
+            .upload_file(user, &canonical, kind, name.as_deref())
+            .await?;
+        self.qq_client.send_media(user, message, &uploaded).await
     }
-
-    async fn clear_active_turn(&self) {
-        self.active_turn.lock().await.take();
-    }
-
-    async fn cancel_active_turn(&self) {
-        if let Some(cancel) = self.active_turn.lock().await.take() {
-            let _ = cancel.send(());
-        }
-    }
-
-    async fn send_directive(
-        &self,
-        openid: &str,
-        message_id: &str,
-        directive: Directive,
-    ) -> Result<()> {
-        match directive {
-            Directive::Image { path } => {
-                info!(path = %path.display(), "sending image directive to qq");
-                let info = self.qq_client.upload_file(openid, &path, 1, None).await?;
-                self.qq_client.send_media(openid, message_id, &info).await?;
-            }
-            Directive::File { path, name } => {
-                info!(path = %path.display(), "sending file directive to qq");
-                let info = self
-                    .qq_client
-                    .upload_file(openid, &path, 4, name.as_deref())
-                    .await?;
-                self.qq_client.send_media(openid, message_id, &info).await?;
-            }
-        }
-        Ok(())
+    pub fn start_workers(self: &Arc<Self>) {
+        inbound::spawn_inbox(self.clone());
+        inbound::spawn_outbox(self.clone());
+        crate::memory::distill::spawn(self.clone());
+        inbound::spawn_attachment_cleanup(self.clone());
     }
 }

@@ -1,348 +1,487 @@
-use std::{collections::BTreeMap, future::Future, path::PathBuf, pin::Pin};
-
-use anyhow::{Context, Result, anyhow};
-use chrono::{DateTime, Utc};
-use rust_i18n::t;
-
 use crate::{
-    codex::{CodexModelEntry, CodexRuntimeProfile, list_codex_model_entries},
-    session::{
-        DiskSessionMeta, SessionListScope, SessionStore,
-        state::{
-            ApprovalPolicySetting, CommandAlias, ContextMode, PendingSetting, ReasoningEffort,
-            ServiceTier, UserSessionState,
-        },
+    codex::CodexModelEntry,
+    model::settings::{
+        ApprovalPolicySetting, ContextMode, PendingSetting, ReasoningEffort, ServiceTier,
     },
-    util::lang::{is_supported_lang, normalize_lang},
+    session::SessionStore,
 };
-
-mod alias;
-mod cron_cmds;
-mod interactive;
-mod listing;
-mod session_cmds;
-mod settings_cmds;
-#[cfg(test)]
-mod tests;
-
-use alias::*;
-use cron_cmds::*;
-use listing::*;
-use session_cmds::*;
-use settings_cmds::*;
-
-#[derive(Debug, Clone)]
-pub(crate) struct CommandReply {
-    pub(crate) text: String,
-}
-
+use anyhow::{Result, anyhow};
 pub(crate) enum CommandOutcome {
-    Reply(CommandReply),
+    Reply(String),
     Continue,
-    CancelCurrent(String),
-    StopCurrent(String),
+    Stop,
+    Cancel,
     Compact,
-    SelfUpdate,
-    SetGlobalModel(Option<String>),
-    SetGlobalReasoning(Option<ReasoningEffort>),
-    SetGlobalFast(Option<ServiceTier>),
-    SetGlobalContext(Option<ContextMode>),
-    RetryResume,
-    /// Resolve the user's next pending approval request with the given
-    /// decision. App looks up its `pending_approvals[openid]` queue and
-    /// sends the result back to the app-server via the broker.
+    New,
     Approval(ApprovalIntent),
+    RetryResume,
 }
-
-impl CommandOutcome {
-    /// Wraps any string-ish value as a reply outcome, collapsing the
-    /// `CommandOutcome::Reply(CommandReply { text })` boilerplate.
-    fn reply(text: impl Into<String>) -> Self {
-        CommandOutcome::Reply(CommandReply { text: text.into() })
-    }
-
-    /// Localized reply for translation keys without interpolation arguments.
-    fn reply_t(key: &str, locale: &str) -> Self {
-        Self::reply(t!(key, locale = locale))
-    }
-
-    /// Applies `f` to the text payload of the text-carrying variants
-    /// (`Reply` / `CancelCurrent` / `StopCurrent`); every other variant is
-    /// passed through unchanged.
-    fn map_text(self, f: impl FnOnce(String) -> String) -> Self {
-        match self {
-            CommandOutcome::Reply(reply) => Self::reply(f(reply.text)),
-            CommandOutcome::CancelCurrent(msg) => CommandOutcome::CancelCurrent(f(msg)),
-            CommandOutcome::StopCurrent(msg) => CommandOutcome::StopCurrent(f(msg)),
-            other => other,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub(crate) enum ApprovalIntent {
     Accept,
     AcceptForSession,
     Decline,
     Cancel,
 }
-
-#[derive(Clone, Copy)]
-pub(crate) struct CommandActivity {
-    pub(crate) is_busy: bool,
-    pub(crate) has_active_turn: bool,
-}
-
-/// Shared per-dispatch context threaded through every command handler.
-///
-/// Bundles the values the dispatcher previously passed positionally, so all
-/// handler signatures stay uniform regardless of which values they use.
-#[derive(Clone, Copy)]
-struct CmdCtx<'a> {
-    openid: &'a str,
-    session: &'a SessionStore,
-    default_model: &'a str,
-    runtime_profile: &'a CodexRuntimeProfile,
-    is_busy: bool,
-    has_active_turn: bool,
-    /// Timezone every user-facing timestamp is rendered in.
-    display_tz: chrono_tz::Tz,
-}
-
-/// Cheap locale lookup for handlers that only need the language string.
-///
-/// Every handler runs after the dispatcher's initial `snapshot_for_user`, so
-/// the user record already exists and skipping the deep snapshot clone (and
-/// its ensure-user side effect) is safe here.
-async fn user_locale(session: &SessionStore, openid: &str) -> String {
-    session
-        .language_for_user(openid)
-        .await
-        .unwrap_or_else(crate::session::state::default_language)
-}
-
-pub(crate) async fn maybe_handle_command(
+pub(crate) async fn handle(
     text: &str,
-    openid: &str,
+    user: &str,
     session: &SessionStore,
-    default_model: &str,
-    runtime_profile: &CodexRuntimeProfile,
-    activity: CommandActivity,
-    display_tz: chrono_tz::Tz,
+    busy: bool,
+    models: &[CodexModelEntry],
 ) -> Result<CommandOutcome> {
-    let ctx = CmdCtx {
-        openid,
-        session,
-        default_model,
-        runtime_profile,
-        is_busy: activity.is_busy,
-        has_active_turn: activity.has_active_turn,
-        display_tz,
+    let snapshot = session.snapshot_for_user(user).await?;
+    let explicit_command = text.trim_start().starts_with('/');
+    if explicit_command && snapshot.pending_setting.is_some() {
+        // A fresh slash command always cancels an older numbered picker.  Picker
+        // state is UI state, not conversation intent, and must never leak into
+        // a later command or ordinary chat message.
+        session.set_pending_setting(user, None).await?;
+    }
+    let expanded = if !explicit_command {
+        if let Some(pending) = &snapshot.pending_setting {
+            let command = pending.command_name("en");
+            let raw = text.trim();
+            let options = match pending {
+                PendingSetting::Reasoning => vec!["low", "medium", "high", "xhigh", "max", "inherit"],
+                PendingSetting::Fast => vec!["on", "off", "inherit"],
+                PendingSetting::Context => vec!["standard", "1m", "inherit"],
+                PendingSetting::Verbose | PendingSetting::Plan => vec!["on", "off"],
+                PendingSetting::Lang => vec!["zh", "en"],
+                PendingSetting::Approvals => vec![
+                    "untrusted",
+                    "on-request",
+                    "never",
+                    "guardian-subagent",
+                    "inherit",
+                ],
+                _ => Vec::new(),
+            };
+            let selected = if let Ok(n) = raw.parse::<usize>() {
+                if matches!(pending, PendingSetting::Model) {
+                    models
+                        .get(n.saturating_sub(1))
+                        .map(|m| m.name.clone())
+                } else if matches!(
+                    pending,
+                    PendingSetting::Fg
+                        | PendingSetting::ResumeProjects
+                        | PendingSetting::SessionsProjects
+                ) {
+                    snapshot
+                        .last_sessions_view
+                        .get(n.saturating_sub(1))
+                        .cloned()
+                } else {
+                    options.get(n.saturating_sub(1)).map(|v| (*v).to_owned())
+                }
+            } else if matches!(pending, PendingSetting::Model) {
+                (matches!(raw, "inherit" | "default")
+                    || models.iter().any(|m| m.name == raw))
+                .then(|| raw.to_owned())
+            } else if options.contains(&raw) {
+                Some(raw.to_owned())
+            } else {
+                None
+            };
+            session.set_pending_setting(user, None).await?;
+            if let Some(value) = selected {
+                format!("{command} {value}")
+            } else {
+                // An unrelated ordinary message is conversation, not a malformed
+                // picker response.  Cancel the stale picker and let the message
+                // continue to the model unchanged.
+                text.to_owned()
+            }
+        } else {
+            text.to_owned()
+        }
+    } else {
+        text.to_owned()
     };
-    maybe_handle_command_inner(text, ctx, 0).await
-}
-
-fn maybe_handle_command_inner<'a>(
-    text: &'a str,
-    ctx: CmdCtx<'a>,
-    alias_depth: usize,
-) -> Pin<Box<dyn Future<Output = Result<CommandOutcome>> + Send + 'a>> {
-    Box::pin(async move {
-        let CmdCtx {
-            openid,
-            session,
-            default_model,
-            runtime_profile,
-            is_busy,
-            ..
-        } = ctx;
-        let snapshot = session.snapshot_for_user(openid).await?;
-        let lang_string = snapshot.settings.language.clone();
-        let locale = lang_string.as_str();
-        let pending_before = snapshot.pending_setting.clone();
-        let is_slash_input = text.trim_start().starts_with('/');
-
-        // Plain text while in an interactive setting is consumed by the
-        // pending handler — never forwarded to Codex.
-        if !is_slash_input {
-            if let Some(pending) = pending_before {
-                return interactive::consume_pending_input(pending, text, ctx).await;
+    let text = expanded.as_str();
+    let trimmed = text.trim();
+    let Some(first) = trimmed.split_whitespace().next() else {
+        return Ok(CommandOutcome::Continue);
+    };
+    let cmd = canonicalize(first);
+    let rest = trimmed[first.len()..].trim();
+    if !cmd.starts_with('/') {
+        return Ok(CommandOutcome::Continue);
+    }
+    let reply = |s: String| {
+        Ok(CommandOutcome::Reply(if s.is_empty() {
+            if snapshot.settings.language == "zh" {
+                "没有可用会话或选项。".into()
+            } else {
+                "No available conversations or options.".into()
             }
-            return Ok(CommandOutcome::Continue);
+        } else {
+            s
+        }))
+    };
+    if cmd == "/back" {
+        session.set_pending_setting(user, None).await?;
+        return reply("cancelled".into());
+    }
+    if rest.is_empty() {
+        let (pending, choices) = match cmd {
+            "/model" => (
+                Some(PendingSetting::Model),
+                models
+                    .iter()
+                    .enumerate()
+                    .map(|(i, m)| {
+                        format!(
+                            "{}. {} {}",
+                            i + 1,
+                            m.name,
+                            m.description.as_deref().unwrap_or_default()
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            "/reasoning" => (
+                Some(PendingSetting::Reasoning),
+                "1. low\n2. medium\n3. high\n4. xhigh\n5. max\n6. inherit".into(),
+            ),
+            "/fast" => (
+                Some(PendingSetting::Fast),
+                "1. on\n2. off\n3. inherit".into(),
+            ),
+            "/context" => (
+                Some(PendingSetting::Context),
+                "1. standard\n2. 1m\n3. inherit".into(),
+            ),
+            "/verbose" => (Some(PendingSetting::Verbose), "1. on\n2. off".into()),
+            "/plan" => (Some(PendingSetting::Plan), "1. on\n2. off".into()),
+            "/lang" => (Some(PendingSetting::Lang), "1. zh\n2. en".into()),
+            "/approvals" => (
+                Some(PendingSetting::Approvals),
+                "1. untrusted\n2. on-request\n3. never\n4. guardian-subagent\n5. inherit".into(),
+            ),
+            _ => (None, String::new()),
+        };
+        if let Some(pending) = pending {
+            session.set_pending_setting(user, Some(pending)).await?;
+            return reply(choices);
         }
-
-        let trimmed = text.trim();
-        let mut parts = trimmed.split_whitespace();
-        let raw_command = parts.next().unwrap_or_default().to_ascii_lowercase();
-        let command = canonicalize_core_command(&raw_command).to_string();
-        let rest = parts.collect::<Vec<_>>();
-
-        if matches!(pending_before, Some(PendingSetting::ResumeRecovery)) {
-            match command.as_str() {
-                "/retry" => {
-                    session.set_pending_setting(openid, None).await?;
-                    return Ok(CommandOutcome::RetryResume);
-                }
-                "/cancel" => {
-                    session.set_pending_setting(openid, None).await?;
-                    return Ok(CommandOutcome::reply_t(
-                        "commands.resume.recovery_cancelled",
-                        locale,
-                    ));
-                }
-                _ => {}
-            }
-        }
-
-        // /back is a global escape: exits the current interactive setting, or
-        // politely reports that nothing interactive was in progress.
-        if command.as_str() == "/back" {
-            if let Some(pending) = pending_before {
-                session.set_pending_setting(openid, None).await?;
-                return Ok(CommandOutcome::reply(t!(
-                    "commands.back.exited",
-                    cmd = pending.command_name(locale),
-                    locale = locale
-                )));
-            }
-            return Ok(CommandOutcome::reply_t("commands.back.idle", locale));
-        }
-
-        // Non-/back slash command while in an interactive setting: quietly
-        // exit the pending state and prepend a notice to the eventual reply.
-        let had_pending_picker = pending_before.is_some();
-        let pending_exit_prefix = if let Some(pending) = pending_before {
-            session.set_pending_setting(openid, None).await?;
-            Some(
-                t!(
-                    "commands.back.exited",
-                    cmd = pending.command_name(locale),
-                    locale = locale
+    }
+    match cmd {
+        "/approve" => Ok(CommandOutcome::Approval(ApprovalIntent::Accept)),
+        "/approve-session" => Ok(CommandOutcome::Approval(ApprovalIntent::AcceptForSession)),
+        "/deny" => Ok(CommandOutcome::Approval(ApprovalIntent::Decline)),
+        "/cancel" => Ok(CommandOutcome::Approval(ApprovalIntent::Cancel)),
+        "/interrupt" => Ok(CommandOutcome::Cancel),
+        "/stop" => Ok(CommandOutcome::Stop),
+        "/new" => Ok(CommandOutcome::New),
+        "/compact" => {
+            anyhow::ensure!(!busy, "A turn is active; interrupt it before compacting.");
+            Ok(CommandOutcome::Compact)
+        },
+        "/retry" => Ok(CommandOutcome::RetryResume),
+        "/help" if rest == "all" => reply(if snapshot.settings.language == "zh" {
+            include_str!("../../docs/commands.md").to_owned()
+        } else {
+            include_str!("../../docs/commands_en.md").to_owned()
+        }),
+        "/help" => reply(
+            rust_i18n::t!(
+                "commands.help.compact",
+                locale = snapshot.settings.language.as_str()
+            )
+            .into_owned(),
+        ),
+        "/status" => {
+            let s = session.snapshot_for_user(user).await?;
+            reply(format!(
+                "running: {busy}\nthread: {}\nbackground: {}\nsettings: {}",
+                s.foreground.session_id.as_deref().unwrap_or("new"),
+                s.background_order.join(", "),
+                format!(
+                    "{}; fast={}",
+                    serde_json::to_string(&s.effective_settings())?,
+                    ServiceTier::fast_label(s.effective_settings().service_tier)
                 )
-                .into_owned(),
+            ))
+        }
+        "/sessions" => {
+            let dialogs = session.db.owned_dialogs(user)?;
+            let ids = dialogs.iter().map(|d| d.0.clone()).collect();
+            session.remember_sessions_view(user, ids).await?;
+            reply(
+                dialogs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (id, alias, state))| {
+                        format!(
+                            "{}. {} {} ({state})",
+                            i + 1,
+                            alias.as_deref().unwrap_or(""),
+                            id
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
             )
-        } else {
-            None
-        };
-
-        // Guard against picker/approval crossfire: when a picker was active and
-        // the user issues an approval command (the documented picker-escape is
-        // /back, and pickers are not busy-gated so a turn can be paused awaiting
-        // approval), exit the picker but do NOT dispatch the approval — that
-        // would silently resolve a queued Codex approval and abort the turn.
-        // Require the approval command to be re-issued.
-        if had_pending_picker
-            && matches!(
-                command.as_str(),
-                "/approve" | "/approve-session" | "/deny" | "/cancel"
-            )
-        {
-            return Ok(CommandOutcome::reply(
-                pending_exit_prefix.unwrap_or_default(),
-            ));
+        }
+        "/bg" => {
+            let r = session
+                .move_foreground_to_background(user, (!rest.is_empty()).then_some(rest), busy)
+                .await?;
+            reply(format!(
+                "background: {}",
+                r.parked_alias
+                    .or(r.reserved_alias)
+                    .unwrap_or_else(|| "empty".into())
+            ))
+        }
+        "/resume" => {
+            if rest.is_empty() {
+                let dialogs = session.db.owned_dialogs(user)?;
+                session
+                    .remember_sessions_view(user, dialogs.iter().map(|d| d.0.clone()).collect())
+                    .await?;
+                session
+                    .set_pending_setting(user, Some(PendingSetting::ResumeProjects))
+                    .await?;
+                return reply(
+                    dialogs
+                        .iter()
+                        .enumerate()
+                        .map(|(i, d)| {
+                            format!("{}. {} {}", i + 1, d.0, d.1.as_deref().unwrap_or(""))
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                );
+            }
+            let s = session.snapshot_for_user(user).await?;
+            let target = rest
+                .parse::<usize>()
+                .ok()
+                .and_then(|n| s.last_sessions_view.get(n.saturating_sub(1)))
+                .map(String::as_str)
+                .unwrap_or(rest);
+            if s.background.contains_key(target) {
+                session.foreground_from_background(user, target).await?;
+            } else {
+                session.resume_owned(user, target).await?;
+            }
+            reply("conversation resumed".into())
+        }
+        "/fg" => {
+            let s = session.snapshot_for_user(user).await?;
+            if rest.is_empty() {
+                session
+                    .remember_sessions_view(user, s.background_order.clone())
+                    .await?;
+                session
+                    .set_pending_setting(user, Some(PendingSetting::Fg))
+                    .await?;
+                return reply(
+                    s.background_order
+                        .iter()
+                        .enumerate()
+                        .map(|(i, a)| format!("{}. {a}", i + 1))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                );
+            }
+            let alias = rest
+                .parse::<usize>()
+                .ok()
+                .and_then(|n| s.last_sessions_view.get(n.saturating_sub(1)))
+                .map(String::as_str)
+                .unwrap_or(rest);
+            session.foreground_from_background(user, alias).await?;
+            reply(format!("foreground: {alias}"))
+        }
+        "/save" => {
+            session.save_foreground(user).await?;
+            reply("saved".into())
+        }
+        "/rename" => {
+            let parts: Vec<_> = rest.split_whitespace().collect();
+            anyhow::ensure!(parts.len() == 2, "usage: /rename <old> <new>");
+            session
+                .rename_background_alias(user, parts[0], parts[1])
+                .await?;
+            reply("renamed".into())
+        }
+        "/model" => {
+            if rest.is_empty() {
+                return reply(
+                    models
+                        .iter()
+                        .map(|m| {
+                            format!(
+                                "{} {}",
+                                m.name,
+                                m.description.as_deref().unwrap_or_default()
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                );
+            }
+            let value = (!matches!(rest, "inherit" | "default")).then(|| rest.to_owned());
+            let other = value.clone();
+            session
+                .set_active_profile(
+                    user,
+                    |p| p.model_override = value,
+                    |s| s.model_override = other,
+                )
+                .await?;
+            reply("model updated".into())
+        }
+        "/reasoning" => {
+            let value = if matches!(rest, "inherit" | "default") {
+                None
+            } else {
+                Some(
+                    ReasoningEffort::parse_supported(rest)
+                        .ok_or_else(|| anyhow!("use low, medium, high, xhigh, max or inherit"))?,
+                )
+            };
+            session
+                .set_active_profile(
+                    user,
+                    |p| p.reasoning_effort = value,
+                    |s| s.reasoning_effort = value,
+                )
+                .await?;
+            reply("reasoning updated".into())
+        }
+        "/fast" => {
+            let value = if matches!(rest, "inherit" | "default") {
+                None
+            } else {
+                Some(ServiceTier::parse(rest).ok_or_else(|| anyhow!("use on, off or inherit"))?)
+            };
+            session
+                .set_active_profile(user, |p| p.service_tier = value, |s| s.service_tier = value)
+                .await?;
+            reply("service tier updated".into())
+        }
+        "/context" => {
+            let value = if matches!(rest, "inherit" | "default") {
+                None
+            } else {
+                Some(
+                    ContextMode::parse(rest)
+                        .ok_or_else(|| anyhow!("use standard, 1m or inherit"))?,
+                )
+            };
+            session
+                .set_active_profile(user, |p| p.context_mode = value, |s| s.context_mode = value)
+                .await?;
+            reply("context updated".into())
+        }
+        "/lang" => {
+            anyhow::ensure!(crate::util::lang::is_supported_lang(rest), "use zh or en");
+            session
+                .update_settings_for_user(user, |s| {
+                    s.language = crate::util::lang::normalize_lang(rest).into()
+                })
+                .await?;
+            reply("language updated".into())
+        }
+        "/verbose" | "/plan" => {
+            anyhow::ensure!(matches!(rest, "on" | "off"), "use on or off");
+            session
+                .update_settings_for_user(user, |s| {
+                    if cmd == "/plan" {
+                        s.plan_mode = rest == "on"
+                    } else {
+                        s.verbose = rest == "on"
+                    }
+                })
+                .await?;
+            reply("updated".into())
+        }
+        "/execute-plan" => {
+            session
+                .update_settings_for_user(user, |s| s.plan_mode = false)
+                .await?;
+            Ok(CommandOutcome::Continue)
+        }
+        "/keep-planning" => {
+            session
+                .update_settings_for_user(user, |s| s.plan_mode = true)
+                .await?;
+            reply("planning enabled".into())
+        }
+        "/cancel-plan" => {
+            session
+                .update_settings_for_user(user, |s| {
+                    s.plan_mode = false;
+                    s.pending_plan = None;
+                })
+                .await?;
+            reply("plan cancelled".into())
+        }
+        "/approvals" => {
+            let value = if matches!(rest, "inherit" | "default") {
+                None
+            } else {
+                Some(ApprovalPolicySetting::parse(rest).ok_or_else(|| {
+                    anyhow!("use inherit, never, on-request, untrusted or guardian-subagent")
+                })?)
+            };
+            session
+                .update_settings_for_user(user, |s| s.approval_policy_override = value)
+                .await?;
+            let label = value
+                .map(|p| {
+                    if snapshot.settings.language == "zh" {
+                        p.label_zh()
+                    } else {
+                        p.label_en()
+                    }
+                })
+                .unwrap_or("inherit");
+            reply(format!("approval policy: {label}"))
         }
 
-        let outcome_result: Result<CommandOutcome> = match command.as_str() {
-            "/help" => {
-                let full = rest
-                    .first()
-                    .is_some_and(|arg| matches!(*arg, "all" | "full" | "全部" | "完整"));
-                Ok(CommandOutcome::reply(help_text(&lang_string, full)))
-            }
-            "/lang" => handle_lang(&rest, ctx).await,
-            "/model" => handle_model(&rest, ctx).await,
-            "/fast" => handle_fast(&rest, ctx).await,
-            "/context" => handle_context(&rest, ctx).await,
-            "/reasoning" => handle_reasoning(&rest, ctx).await,
-            "/verbose" => handle_verbose(&rest, ctx).await,
-            "/approvals" => handle_approvals(&rest, ctx).await,
-            "/plan" => handle_plan(&rest, ctx).await,
-            "/cron" => handle_cron(&rest, ctx).await,
-            "/execute-plan" => handle_execute_plan(ctx).await,
-            "/keep-planning" => handle_keep_planning(ctx).await,
-            "/cancel-plan" => handle_cancel_plan(ctx).await,
-            "/approve" => Ok(CommandOutcome::Approval(ApprovalIntent::Accept)),
-            "/approve-session" => Ok(CommandOutcome::Approval(ApprovalIntent::AcceptForSession)),
-            "/deny" => Ok(CommandOutcome::Approval(ApprovalIntent::Decline)),
-            "/cancel" => Ok(CommandOutcome::Approval(ApprovalIntent::Cancel)),
-            "/retry" => Ok(CommandOutcome::reply_t(
-                "commands.resume.no_recovery",
-                locale,
-            )),
-            "/status" => {
-                let snapshot = session.snapshot_for_user(openid).await?;
-                // Pre-fetch disk metadata so background rows can show when a
-                // parked dialog was last touched and what it was about.
-                let disk_meta = if snapshot.background.is_empty() {
-                    std::collections::HashMap::new()
-                } else {
-                    session
-                        .list_disk_sessions(crate::session::SessionListScope::All)
-                        .await
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(|meta| (meta.id.clone(), (meta.updated_at, meta.title)))
-                        .collect()
-                };
-                Ok(CommandOutcome::reply(build_status_text(
-                    &snapshot,
-                    default_model,
-                    runtime_profile,
-                    is_busy,
-                    ctx.display_tz,
-                    session.attachment_workspace_dir(),
-                    &disk_meta,
-                )))
-            }
-            "/sessions" => handle_sessions(&rest, ctx).await,
-            "/import" => handle_import(&rest, ctx).await,
-            "/new" => {
-                // Strip the user's *actual* first token, not the canonical command:
-                // `command` is the lowercased/aliased form ("/new"), but `trimmed`
-                // still starts with what the user typed (e.g. "/新建" or "/New"), so
-                // strip_prefix(command) would fail and silently drop the <dir> arg.
-                let first_token = trimmed.split_whitespace().next().unwrap_or_default();
-                let raw_args = trimmed[first_token.len()..].trim();
-                handle_new(raw_args, ctx).await
-            }
-            "/bg" => handle_bg(&rest, ctx).await,
-            "/fg" => handle_fg(&rest, ctx).await,
-            "/resume" => handle_restore(RestoreMode::Resume, &rest, ctx).await,
-            "/loadbg" => handle_restore(RestoreMode::Loadbg, &rest, ctx).await,
-            "/save" => handle_save(ctx).await,
-            "/rename" => handle_rename(&rest, ctx).await,
-            "/stop" => handle_stop(ctx).await,
-            "/interrupt" => Ok(CommandOutcome::CancelCurrent(
-                t!("errors.interrupt_requested", locale = locale).into_owned(),
-            )),
-            "/compact" => Ok(CommandOutcome::Compact),
-            "/self-update" => Ok(CommandOutcome::SelfUpdate),
-            "/alias" => handle_alias(&rest, ctx).await,
-            other => {
-                let alias_name = other.trim_start_matches('/').to_ascii_lowercase();
-                if !alias_name.is_empty()
-                    && let Some(alias) = session.get_command_alias(openid, &alias_name).await?
-                {
-                    expand_alias(&alias, ctx, alias_depth).await
-                } else {
-                    Ok(CommandOutcome::Continue)
-                }
-            }
-        };
-
-        let outcome = outcome_result?;
-        if let Some(prefix) = pending_exit_prefix {
-            Ok(prepend_pending_exit(prefix, outcome))
-        } else {
-            Ok(outcome)
-        }
-    })
+        _ => Ok(CommandOutcome::Continue),
+    }
 }
 
-fn busy_reply(locale: &str) -> CommandOutcome {
-    CommandOutcome::reply_t("errors.busy", locale)
-}
-
-fn prepend_pending_exit(prefix: String, outcome: CommandOutcome) -> CommandOutcome {
-    outcome.map_text(|text| format!("{prefix}\n\n{text}"))
+pub(crate) fn canonicalize(command: &str) -> &str {
+    match command {
+        "/帮助" => "/help",
+        "/状态" => "/status",
+        "/会话" => "/sessions",
+        "/模型" => "/model",
+        "/快速" => "/fast",
+        "/上下文" => "/context",
+        "/思考" => "/reasoning",
+        "/语言" => "/lang",
+        "/详细" => "/verbose",
+        "/恢复" => "/resume",
+        "/后台" => "/bg",
+        "/前台" => "/fg",
+        "/保存" => "/save",
+        "/新建" => "/new",
+        "/停止" => "/stop",
+        "/中断" => "/interrupt",
+        "/压缩" => "/compact",
+        "/重命名" => "/rename",
+        "/返回" => "/back",
+        "/审批" => "/approvals",
+        "/定时" => "/cron",
+        "/计划" => "/plan",
+        "/同意" => "/approve",
+        "/同意本会话" => "/approve-session",
+        "/拒绝" => "/deny",
+        "/取消" => "/cancel",
+        "/实施" => "/execute-plan",
+        "/继续规划" => "/keep-planning",
+        "/取消计划" => "/cancel-plan",
+        "/重试" => "/retry",
+        other => other,
+    }
 }

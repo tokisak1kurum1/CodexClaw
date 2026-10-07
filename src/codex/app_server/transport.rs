@@ -1,90 +1,86 @@
-//! Newline-delimited JSON transport for the `codex app-server` stdio child.
+//! WebSocket transport for the shared Codex app-server daemon.
 //!
-//! Each line on stdout is parsed as either a `Response`, a server-initiated
-//! `Request`, or a `Notification`. Parsing failures are reported to the caller
-//! which logs them and keeps reading (a malformed line must never kill the
-//! reader).
+//! The managed daemon listens on a Unix-domain control socket and requires a
+//! WebSocket upgrade (`ws://localhost/rpc`) before JSON-RPC traffic.  Each
+//! JSON-RPC message is carried in one WebSocket text frame.
 
-use std::process::Stdio;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    process::{Child, ChildStderr, ChildStdin, ChildStdout, Command},
-    sync::Mutex,
-};
+use futures_util::{SinkExt, StreamExt, stream::{SplitSink, SplitStream}};
+use tokio::{net::UnixStream, sync::Mutex};
+use tokio_tungstenite::{WebSocketStream, client_async, tungstenite::Message as WsMessage};
 use tracing::{debug, warn};
 
 use super::protocol::{JsonRpcError, Message};
 
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const UDS_WEBSOCKET_HANDSHAKE_URL: &str = "ws://localhost/rpc";
+
+type DaemonWebSocket = WebSocketStream<UnixStream>;
+type DaemonWriter = SplitSink<DaemonWebSocket, WsMessage>;
+pub(crate) type DaemonReader = SplitStream<DaemonWebSocket>;
+
 pub(crate) struct StdioTransport {
-    /// Held by the writer side.
-    stdin: Mutex<ChildStdin>,
-    stdout: Mutex<Option<BufReader<ChildStdout>>>,
-    stderr: Mutex<Option<ChildStderr>>,
-    child: Mutex<Option<Child>>,
+    writer: Mutex<DaemonWriter>,
+    reader: Mutex<Option<DaemonReader>>,
 }
 
 impl StdioTransport {
-    /// Spawn `codex app-server --listen stdio://` with the given environment.
-    pub(crate) fn spawn(
-        codex_binary: &std::path::Path,
+    /// Connect to the official app-server daemon control socket and complete
+    /// the WebSocket upgrade.  The other parameters are retained in the
+    /// signature so the supervisor wiring stays stable while the transport no
+    /// longer owns a child process.
+    pub(crate) async fn connect(
+        _codex_binary: &std::path::Path,
         codex_home: &std::path::Path,
-        sqlite_home: &std::path::Path,
-        extra_path: Option<&std::ffi::OsStr>,
+        _sqlite_home: &std::path::Path,
+        _extra_path: Option<&std::ffi::OsStr>,
     ) -> Result<Self> {
-        let mut cmd = Command::new(codex_binary);
-        cmd.arg("app-server")
-            .arg("--listen")
-            .arg("stdio://")
-            .env("CODEX_HOME", codex_home)
-            .env("CODEX_SQLITE_HOME", sqlite_home)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        if let Some(path) = extra_path {
-            cmd.env("PATH", path);
-        }
-        let mut child = cmd
-            .spawn()
-            .with_context(|| format!("failed to spawn {}", codex_binary.display()))?;
-        let stdin = child.stdin.take().context("child stdin missing")?;
-        let stdout = child.stdout.take().context("child stdout missing")?;
-        let stderr = child.stderr.take().context("child stderr missing")?;
+        let socket_path = codex_home
+            .join("app-server-control")
+            .join("app-server-control.sock");
+        let endpoint = format!("unix://{}", socket_path.display());
+
+        let stream = tokio::time::timeout(CONNECT_TIMEOUT, UnixStream::connect(&socket_path))
+            .await
+            .with_context(|| format!("timed out connecting to {endpoint}"))?
+            .with_context(|| format!("failed to connect to {endpoint}"))?;
+
+        let (websocket, _) = tokio::time::timeout(
+            CONNECT_TIMEOUT,
+            client_async(UDS_WEBSOCKET_HANDSHAKE_URL, stream),
+        )
+        .await
+        .with_context(|| format!("timed out upgrading {endpoint} to WebSocket"))?
+        .with_context(|| format!("failed to upgrade {endpoint} to WebSocket"))?;
+
+        let (writer, reader) = websocket.split();
         Ok(Self {
-            stdin: Mutex::new(stdin),
-            stdout: Mutex::new(Some(BufReader::new(stdout))),
-            stderr: Mutex::new(Some(stderr)),
-            child: Mutex::new(Some(child)),
+            writer: Mutex::new(writer),
+            reader: Mutex::new(Some(reader)),
         })
     }
 
-    pub(crate) async fn take_stdout(&self) -> Option<BufReader<ChildStdout>> {
-        self.stdout.lock().await.take()
-    }
-
-    pub(crate) async fn take_stderr(&self) -> Option<ChildStderr> {
-        self.stderr.lock().await.take()
-    }
-
-    pub(crate) async fn take_child(&self) -> Option<Child> {
-        self.child.lock().await.take()
+    pub(crate) async fn take_reader(&self) -> Option<DaemonReader> {
+        self.reader.lock().await.take()
     }
 
     pub(crate) async fn write_message(&self, value: serde_json::Value) -> Result<()> {
-        let mut line = serde_json::to_vec(&value).context("serialize JSON-RPC message")?;
-        line.push(b'\n');
-        let mut stdin = self.stdin.lock().await;
-        stdin.write_all(&line).await.context("write stdin")?;
-        stdin.flush().await.context("flush stdin")?;
+        let payload = serde_json::to_string(&value).context("serialize JSON-RPC message")?;
+        self.writer
+            .lock()
+            .await
+            .send(WsMessage::Text(payload.into()))
+            .await
+            .context("write daemon websocket")?;
         Ok(())
     }
 }
 
-/// Try to parse a single stdout line into a `Message`.
-fn parse_line(line: &str) -> Result<Message, ParseError> {
-    let value: serde_json::Value = serde_json::from_str(line).map_err(ParseError::Invalid)?;
+/// Try to parse a single JSON text frame into a `Message`.
+fn parse_frame(text: &str) -> Result<Message, ParseError> {
+    let value: serde_json::Value = serde_json::from_str(text).map_err(ParseError::Invalid)?;
     let obj = value.as_object().ok_or(ParseError::NotObject)?;
     let method = obj
         .get("method")
@@ -93,7 +89,6 @@ fn parse_line(line: &str) -> Result<Message, ParseError> {
     let id = obj.get("id").cloned();
 
     if let (Some(method), Some(id)) = (method.clone(), id.clone()) {
-        // Server → client request (both method + id).
         let params = obj
             .get("params")
             .cloned()
@@ -101,7 +96,6 @@ fn parse_line(line: &str) -> Result<Message, ParseError> {
         return Ok(Message::Request { id, method, params });
     }
     if let Some(method) = method {
-        // Notification (method only, no id).
         let params = obj
             .get("params")
             .cloned()
@@ -109,7 +103,6 @@ fn parse_line(line: &str) -> Result<Message, ParseError> {
         return Ok(Message::Notification { method, params });
     }
     if let Some(id) = id {
-        // Response (id + result/error).
         let outcome = if let Some(err) = obj.get("error") {
             let err: JsonRpcError = serde_json::from_value(err.clone())
                 .map_err(|e| ParseError::BadError(e.to_string()))?;
@@ -138,52 +131,36 @@ pub(crate) enum ParseError {
     BadError(String),
 }
 
-/// Spawn a task that reads stdout line-by-line and invokes `handler` for each
-/// parsed message. Returns when EOF is reached or the handler errors.
+/// Spawn a task that reads daemon WebSocket frames and invokes `handler` for
+/// each parsed JSON-RPC message. Returns when the WebSocket closes.
 pub(crate) fn spawn_reader<F>(
-    reader: BufReader<ChildStdout>,
+    mut reader: DaemonReader,
     mut handler: F,
 ) -> tokio::task::JoinHandle<()>
 where
     F: FnMut(Message) + Send + 'static,
 {
     tokio::spawn(async move {
-        let mut lines = reader.lines();
-        loop {
-            match lines.next_line().await {
-                Ok(Some(line)) => match parse_line(&line) {
+        while let Some(frame) = reader.next().await {
+            match frame {
+                Ok(WsMessage::Text(text)) => match parse_frame(text.as_ref()) {
                     Ok(msg) => handler(msg),
-                    Err(ParseError::Invalid(_)) if line.trim().is_empty() => {}
                     Err(err) => {
-                        warn!(error = %err, line = %line, "dropping unparseable app-server line");
+                        warn!(error = %err, frame = %text, "dropping unparseable app-server frame");
                     }
                 },
-                Ok(None) => {
-                    debug!("app-server stdout EOF");
+                Ok(WsMessage::Close(frame)) => {
+                    debug!(?frame, "app-server websocket closed");
                     break;
                 }
+                Ok(WsMessage::Binary(_))
+                | Ok(WsMessage::Ping(_))
+                | Ok(WsMessage::Pong(_))
+                | Ok(WsMessage::Frame(_)) => {}
                 Err(err) => {
-                    warn!(error = %err, "error reading app-server stdout");
+                    warn!(error = %err, "error reading app-server websocket");
                     break;
                 }
-            }
-        }
-    })
-}
-
-/// Spawn a task that drains stderr into tracing (one line per record).
-pub(crate) fn spawn_stderr_logger(stderr: ChildStderr) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut lines = BufReader::new(stderr).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            let trimmed = line.trim_end();
-            if trimmed.is_empty() {
-                continue;
-            }
-            if trimmed.contains("ERROR") {
-                warn!(target: "codex_app_server", "{}", trimmed);
-            } else {
-                debug!(target: "codex_app_server", "{}", trimmed);
             }
         }
     })
@@ -195,7 +172,7 @@ mod tests {
 
     #[test]
     fn parses_response_without_jsonrpc_field() {
-        let m = parse_line(r#"{"id":1,"result":{"ok":true}}"#).unwrap();
+        let m = parse_frame(r#"{"id":1,"result":{"ok":true}}"#).unwrap();
         match m {
             Message::Response { id, outcome } => {
                 assert_eq!(id, serde_json::json!(1));
@@ -207,7 +184,7 @@ mod tests {
 
     #[test]
     fn parses_notification() {
-        let m = parse_line(r#"{"method":"turn/started","params":{"threadId":"t"}}"#).unwrap();
+        let m = parse_frame(r#"{"method":"turn/started","params":{"threadId":"t"}}"#).unwrap();
         match m {
             Message::Notification { method, params } => {
                 assert_eq!(method, "turn/started");
@@ -219,7 +196,7 @@ mod tests {
 
     #[test]
     fn parses_server_request_with_id() {
-        let m = parse_line(
+        let m = parse_frame(
             r#"{"id":0,"method":"item/commandExecution/requestApproval","params":{"threadId":"t"}}"#,
         )
         .unwrap();
@@ -234,13 +211,88 @@ mod tests {
 
     #[test]
     fn rejects_non_object() {
-        let err = parse_line("[1,2,3]").unwrap_err();
+        let err = parse_frame("[1,2,3]").unwrap_err();
         assert!(matches!(err, ParseError::NotObject));
     }
 
     #[test]
     fn rejects_indeterminate() {
-        let err = parse_line("{}").unwrap_err();
+        let err = parse_frame("{}").unwrap_err();
         assert!(matches!(err, ParseError::Indeterminate));
+    }
+
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn connects_to_daemon_socket_with_websocket_upgrade() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio::net::UnixListener;
+        use tokio_tungstenite::{accept_async, tungstenite::Message as WsMessage};
+
+        let home = tempfile::tempdir().unwrap();
+        let control_dir = home.path().join("app-server-control");
+        std::fs::create_dir_all(&control_dir).unwrap();
+        let socket_path = control_dir.join("app-server-control.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut websocket = accept_async(stream).await.unwrap();
+            let request = websocket.next().await.unwrap().unwrap();
+            let WsMessage::Text(text) = request else {
+                panic!("expected JSON-RPC text frame");
+            };
+            let value: serde_json::Value = serde_json::from_str(text.as_ref()).unwrap();
+            assert_eq!(value["id"], 1);
+            assert_eq!(value["method"], "initialize");
+            websocket
+                .send(WsMessage::Text(
+                    serde_json::json!({"id":1,"result":{"ok":true}})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+        });
+
+        let transport = StdioTransport::connect(
+            std::path::Path::new("/unused/codex"),
+            home.path(),
+            &home.path().join("sqlite"),
+            None,
+        )
+        .await
+        .unwrap();
+        let reader = transport.take_reader().await.unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut tx = Some(tx);
+        let reader_task = spawn_reader(reader, move |message| {
+            if let Some(tx) = tx.take() {
+                let _ = tx.send(message);
+            }
+        });
+        transport
+            .write_message(serde_json::json!({
+                "jsonrpc":"2.0",
+                "id":1,
+                "method":"initialize",
+                "params":{}
+            }))
+            .await
+            .unwrap();
+
+        match tokio::time::timeout(Duration::from_secs(2), rx)
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            Message::Response { id, outcome } => {
+                assert_eq!(id, serde_json::json!(1));
+                assert_eq!(outcome.unwrap()["ok"], true);
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+        reader_task.abort();
+        server.await.unwrap();
     }
 }

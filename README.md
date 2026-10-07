@@ -1,3 +1,5 @@
+> 当前版本通过 Unix socket WebSocket 直连官方 Codex daemon，并使用 SQLite 持久化队列和统一两并发调度。请先阅读 [当前架构](docs/architecture.md)、[配置](docs/configuration.md) 与 [命令](docs/commands.md)；旧的独立 worker、导入和自动更新功能已经移除。
+
 <div align="center">
 
 <img src="./assets/banner.svg" width="600" alt="CodexClaw">
@@ -49,220 +51,47 @@ CodexClaw 是一个构建于 Codex App Server 上、接入 QQ 官方机器人平
 
 ## 功能亮点
 
-- **会话管理** &mdash; 前台/后台多会话并行，支持保存、恢复、导入系统 Codex 会话
-- **定时任务** &mdash; 内置 cron 调度器，支持提醒、Codex 执行、Shell 脚本和交互式多轮对话
-- **记忆蒸馏** &mdash; (实验性) 后台自动从对话中提取记忆，注入后续 prompt
-- **审批流程** &mdash; Codex 执行敏感操作前通过 QQ 请求用户审批，支持按会话自动放行
-- **自更新** &mdash; 通过 QQ 发送 `/self-update` 即可拉取最新代码、编译并热替换
+- 通过 Unix socket WebSocket 直连固定版本的官方 Codex daemon；断线只重连，不重启 daemon。
+- 全局两个 Codex 工作槽，每用户一个；审批、中断、设置、会话和目录按用户隔离。
+- SQLite durable inbox/outbox、QQ 消息去重、重启恢复与失败投递重试。
+- 空闲时首条消息立即启动；回复期间收到的多条普通消息保留在持久化 inbox，并在当前回复结束后合并为下一轮。
+- 保留前台/后台、保存、重命名和当前用户会话恢复；模型菜单来自 model/list。
+- 纯提醒和 ephemeral Codex 定时任务，带宽限窗口，不补跑历史时间点。
+- 按用户隔离的记忆增改删、FTS 历史检索、批量/空闲提炼；IDENTITY / CHARACTER / BEHAVIOR 职责分离。
+- 附件大小、配额和保留期限制；未完成请求引用的附件不清理。
 
 ## 快速开始
 
-> 完整部署指南见 [docs/getting-started.md](docs/getting-started.md)
-
-1. 在你想要部署 CodexClaw 的设备上配置好 Codex 的登陆凭据或 API key，确认 `codex` 命令启动的 TUI 中可以正常和 Codex 进行对话；
-
-2. 前往 [QQ 开放平台](https://q.qq.com/)，按要求完成登陆和个人认证等操作；
-
-3. 在"首页"中，点击"机器人"，然后点击"创建 QQ 机器人"，获得的 AppID 和 AppSecret 记录下来备用；
-    ![image-20260410150111815](./assets/image-20260410150111815.png)
-4. 返回之前的首页，进入你新创建机器人的高级设置页面；
-    ![image-20260410150217404](./assets/image-20260410150217404.png)
-
-5. 下拉左侧栏，找到"回调配置"，在单聊事件中点击"全选"，保存；
-    ![image-20260410150539552](./assets/image-20260410150539552.png)
-
-6. 将第 3 步中获得的 AppID 和 AppSecret 填入下面的提示词中，发送给 Codex，它会帮你完成接下来的工作。注意，由于涉及到系统服务安装等行为，Codex **可能会请求执行一些提权命令，请谨慎检查这些命令的安全性，作者不对因此造成的损失承担任何责任**。如果不希望将密钥泄露给 Codex 的话，你也可以要求 Codex 引导你手工完成部署过程。
-
-```plain
-帮我在本机上部署 CodexClaw：https://github.com/Rhapsody0x1/CodexClaw ，我已经获取了你所需的 AppId: {} 和 AppSecret: {}。然后将其注册为系统服务，并为我提供管理其启用状态的命令。
-```
-
-7. CodexClaw 默认以允许网络访问的 workspace-write 沙盒模式启动 Codex，这能一定程度上保护你的设备安全。但由于各个平台的安全机制，沙盒可能导致 Codex 的一些能力无法正常发挥。目前作者观察到的问题：
-
-    - 在 macOS 上由于 Seatbelt 机制无法正常使用 Playwright 操作浏览器；
-    - 在 Linux 上因系统安全机制不能调用 apt 等系统级命令；
-
-    ~~如有条件，可以考虑在隔离的虚拟机/VPS 上以 danger-full-access 模式运行 Codex，这可以更好地发挥 Codex 的能力。至于如何修改配置，你可以询问万能的 Codex ; )~~ 目前项目已经迁移到了 Codex App Server，现在它可以向用户申请执行高于沙盒权限的命令。
-
-## 命令速查
-
-> 完整命令参考见 [docs/commands.md](docs/commands.md)
-
-如果想要享受 QQ 官方机器人提供的快捷命令，可手动将下面的命令添加到命令列表。当然，不添加也不影响它们的正常使用。
-
-| 命令 | 中文别名 | 说明 |
-|------|---------|------|
-| `/help` | `/帮助` | 查看命令列表 |
-| `/status` | `/状态` | 查看当前会话状态 |
-| `/new [dir]` | `/新建` | 新建前台会话 |
-| `/stop` | `/停止` | 结束当前会话 |
-| `/sessions` | `/会话` | 列出历史会话 |
-| `/model [name]` | `/模型` | 设置或查看模型 |
-| `/compact` | `/压缩` | 压缩会话上下文 |
-| `/self-update` | `/自更新` | 编译并热替换二进制 |
-
-<details>
-<summary>更多命令</summary>
-
-- `/interrupt` / `/中断`：仅停止当前运行，不结束会话
-- `/lang [en\|zh]` / `/语言`：切换界面语言
-- `/fast [on\|off]` / `/快速`：设置 Fast 模式
-- `/context [1m\|standard]` / `/上下文`：设置上下文模式
-- `/reasoning [low\|medium\|high\|xhigh]` / `/思考`：设置思考深度
-- `/verbose [on\|off]` / `/详细`：切换详细输出
-- `/save` / `/保存`：显式保存当前前台会话
-- `/bg [alias]` / `/后台`：将当前会话转入后台
-- `/fg [alias]` / `/前台`：切回指定或最近的后台会话
-- `/resume <id>` / `/恢复`：恢复磁盘会话
-- `/import` / `/导入`：导入系统 Codex 会话
-- `/loadbg <id> [alias]` / `/载入后台`：加载会话到后台
-- `/rename <old> <new>` / `/重命名`：重命名后台标签
-- `/alias` / `/别名`：管理命令别名
-- `/approvals` / `/审批`：切换审批策略
-- `/approve` / `/同意`：放行审批请求
-- `/deny` / `/拒绝`：拒绝审批请求
-- `/plan` / `/计划`：进入计划模式
-- `/cron` / `/定时`：管理定时任务
-
-</details>
-
-## 定时任务
-
-CodexClaw 内置 cron 调度器，支持以下类型的任务：
-
-| 类型 | 说明 |
-|------|------|
-| `reminder` | 在指定时间发送提醒消息 |
-| `codex` | 按计划执行 Codex 任务 |
-| `shell` | 按计划运行 Shell 命令或脚本 |
-| `interactive` | 按计划发起交互式多轮对话 |
-
-> 完整的调度器参考见 [docs/scheduler.md](docs/scheduler.md)
-
-## 运行时文件
-
-| 路径 | 说明 |
-|------|------|
-| `~/.codex-claw/codexclaw.toml` | 主配置文件 |
-| `~/.codex-claw/data/` | 运行时数据目录 |
-| `~/.codex-claw/.codex/` | 独立的 Codex 运行目录 |
-| `~/.codex-claw/data/session/` | 会话存储 |
-| `~/.codex-claw/data/memory/` | 记忆蒸馏数据 |
-| `~/.codex-claw/data/scheduler/` | 调度器持久化数据 |
-
-## 文档
-
-| 文档 | English |
-|------|---------|
-| [快速入门](docs/getting-started.md) | [Getting Started](docs/getting-started_en.md) |
-| [命令参考](docs/commands.md) | [Commands](docs/commands_en.md) |
-| [配置参考](docs/configuration.md) | [Configuration](docs/configuration_en.md) |
-| [定时任务](docs/scheduler.md) | [Scheduler](docs/scheduler_en.md) |
-| [系统架构](docs/architecture.md) | [Architecture](docs/architecture_en.md) |
-| [贡献指南](CONTRIBUTING.md) | [Contributing](CONTRIBUTING_en.md) |
-
-## 贡献指南
-
-本项目主要围绕作者的个人需求与兴趣演进。如果你有新的想法或使用场景，欢迎在 Discussion 中交流；如果你发现了明确的 Bug 或兼容性问题，也欢迎提交 Issue。对于功能建议，作者不保证一定会采纳、排期或长期维护。
-
-若你的需求较为个性化，或与当前路线不完全一致，你可以直接 fork 本仓库，并在其基础上继续定制。如果你做出了有趣的功能，作者主张你**通过分享你使用的 Prompt 或 Plan** 来实现功能的共享。
-
-详细的开发指南见 [CONTRIBUTING.md](CONTRIBUTING.md)。
-
-## 给 Codex 看的部署说明
-
-1. 先检查基础环境，确认当前机器可联网，且已经安装 Rust 与 Codex CLI：
+安装配置指定的 Codex 版本（当前 0.159.2），在配置的 `CODEX_HOME` 准备认证，并手工准备 daemon：
 
 ```bash
-uname -a
-whoami
-pwd
-rustc --version
-cargo --version
-codex --version
-git --version
+export CODEX_HOME="$HOME/.codex-claw/.codex"
+mkdir -p "$CODEX_HOME/app-server-daemon"
+printf '%s\n' '{"remoteControlEnabled":false,"shutdownGraceSeconds":60,"updater":{"autoUpdateEnabled":false,"updateIntervalMinutes":120}}' > "$CODEX_HOME/app-server-daemon/settings.json"
+codex app-server daemon update --from-cli -y
+codex app-server daemon start
+codex app-server daemon version
 ```
 
-2. 如果缺少 Rust 工具链，则安装 Rust；如果缺少 `codex`，则先按当前官方方式安装，并要求用户完成登录。验收命令。若这一步失败，不要继续部署，先要求用户修复 Codex 运行环境与凭据问题。
+在 [QQ 开放平台](https://q.qq.com/) 创建机器人并启用单聊事件。复制 `config/codexclaw.example.toml` 到 `~/.codex-claw/codexclaw.toml`，填写 AppID/AppSecret。
 
 ```bash
-codex exec --json "reply with exactly: ok"
-```
-
-3. 确认系统 Codex 目录 `~/.codex` 已存在，且至少包含 `config.toml` 与 `auth.json`。`codex-claw` 首次启动会将这些文件及 `skills/` 复制到 `~/.codex-claw/.codex/` 作为独立运行目录。
-
-4. 使用用户目录部署（无需提权），例如：
-
-```bash
-mkdir -p ~/.codex-claw
-cd ~/.codex-claw
-git clone https://github.com/Rhapsody0x1/CodexClaw.git repo
-cd repo
-```
-
-若目录已存在仓库，则改为：
-
-```bash
-cd ~/.codex-claw/repo
-git pull --ff-only
-```
-
-5. 创建运行配置文件，例如 `~/.codex-claw/codexclaw.toml`。将用户提供的 `AppID` 与 `AppSecret` 写入其中对应位置：
-
-```toml
-[general]
-data_dir = "~/.codex-claw/data"
-system_codex_home = "~/.codex"
-codex_home_global = "~/.codex-claw/.codex"
-default_workspace_dir = "~/.codex-claw/data/session/workspace"
-codex_binary = "codex"
-default_model = "gpt-5.4"
-default_reasoning_effort = "medium"
-self_repo_dir = "~/.codex-claw/repo"
-self_build_command = "cargo build --release"
-self_binary_path = "~/.codex-claw/repo/target/release/codex-claw"
-
-[qq]
-app_id = "YOUR_APP_ID"
-app_secret = "YOUR_APP_SECRET"
-api_base_url = "https://sandbox.api.sgroup.qq.com"
-token_url = "https://bots.qq.com/app/getAppAccessToken"
-
-[scheduler]
-enabled = true
-tick_secs = 30
-default_tz = "Asia/Shanghai"
-max_concurrent_jobs = 4
-max_turn_secs = 600
-max_attempts = 3
-retry_backoff_secs = 30
-circuit_breaker_threshold = 5
-runs_retention = 30
-```
-
-6. 先做一次编译检查，再构建 release：
-
-```bash
-cd ~/.codex-claw/repo
-cargo check
-cargo build --release
-```
-
-7. 用前台方式先启动一次，确认程序能正常连上 QQ Gateway，且没有明显配置错误：
-
-```bash
-cd ~/.codex-claw/repo
+CARGO_INCREMENTAL=0 cargo build --release --locked
 CODEX_CLAW_CONFIG=~/.codex-claw/codexclaw.toml ./target/release/codex-claw
 ```
 
-如果日志中出现 access token 获取失败、Gateway 连接失败或 Codex 启动失败，先停止并修复问题，再继续后续步骤。
+CLI、daemon 版本必须与 pin 一致。CodexClaw 不安装、启动或更新 daemon。机器人升级由人工 git pull/checkout、release 构建和服务重启完成。
 
-8. 注册为"用户级自启服务"时，需要按系统环境灵活处理（如 macOS `launchd`、Linux 用户级 `systemd`、其他 init 系统）。核心要求：
-- 工作目录指向 `~/.codex-claw/repo`
-- 设置 `CODEX_CLAW_CONFIG=~/.codex-claw/codexclaw.toml`
-- 启动命令为 `~/.codex-claw/repo/target/release/codex-claw`
-- 使用当前登录用户运行，不要求 root
+## 命令与数据
 
-9. 启用并启动服务（命令因系统而异）。由于 `/self-update` 会替换当前运行中的二进制并退出当前进程，因此建议交给外部服务管理器负责重新拉起。
+使用 `/help` 或 `/help all`；详见 [命令](docs/commands.md)、[定时任务](docs/scheduler.md)、[配置](docs/configuration.md) 和 [部署](docs/getting-started.md)。
 
-10. 最后提醒从 QQ 客户端发送一条普通私聊消息进行联调，并检查服务日志。
+状态统一存于 `~/.codex-claw/data/state.db`。工作目录与附件位于 `~/.codex-claw/users/<hashed-user-id>/workspace/` 和 `inbox/`。角色配置由 `~/.codex-claw/BEHAVIOR.md`、`IDENTITY.md` 与 `CHARACTER.md` 组成：IDENTITY 只定义身份，CHARACTER 定义人物背景、性格、关系与台词样例，BEHAVIOR 定义聊天和任务行为。`BEHAVIOR.md` 缺失时使用编译进二进制的默认中文聊天/任务/anti-slop 规则；创建同名文件即可覆盖。三份角色文件只在新会话创建时注入；旧 `SOUL.md` 不再读取。
+
+旧会话/任务 JSON 与 USER.md/MEMORY.md 只迁移一次，保留 `.legacy.bak` 备份。已删除 Codex rollout 导入、二进制自更新、命令宏、交互式定时会话和 ShadowWorker。
+
+## 开发
+
+详见 [架构](docs/architecture.md) 和 [CONTRIBUTING.md](CONTRIBUTING.md)。CI 包含格式检查、clippy 和单元测试；真实认证 daemon smoke 使用显式工作流任务，Codex pin 升级要求其成功结果。
+
+许可证：[MIT](LICENSE)。

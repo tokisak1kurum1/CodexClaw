@@ -1,0 +1,26 @@
+pub const SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS users(user_id TEXT PRIMARY KEY,language TEXT NOT NULL DEFAULT 'zh',model TEXT,reasoning_effort TEXT,service_tier TEXT,context_mode TEXT,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,state_json TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS dialogs(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id TEXT NOT NULL,alias TEXT,state TEXT NOT NULL,codex_thread_id TEXT,model TEXT,reasoning_effort TEXT,service_tier TEXT,context_mode TEXT,loaded_profile_version INTEGER NOT NULL DEFAULT 0,loaded_persona_version INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,dialog_json TEXT NOT NULL);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_dialog_foreground ON dialogs(user_id) WHERE state='foreground';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_dialog_alias ON dialogs(user_id,alias) WHERE alias IS NOT NULL AND state='background';
+CREATE TABLE IF NOT EXISTS inbox(message_id TEXT PRIMARY KEY,user_id TEXT NOT NULL,received_at INTEGER NOT NULL,payload_json TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'pending',attempts INTEGER NOT NULL DEFAULT 0,started_at INTEGER,finished_at INTEGER,last_error TEXT);
+CREATE INDEX IF NOT EXISTS idx_inbox_state_received ON inbox(state,received_at);
+CREATE TABLE IF NOT EXISTS outbox(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id TEXT NOT NULL,reply_to_message_id TEXT,payload_json TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'pending',attempts INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL,delivered_at INTEGER,last_error TEXT,logical_key TEXT UNIQUE,next_attempt_at INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS idx_outbox_state_created ON outbox(state,created_at);
+CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id TEXT NOT NULL,dialog_id INTEGER NOT NULL,role TEXT NOT NULL,content TEXT NOT NULL,platform_message_id TEXT,created_at INTEGER NOT NULL,UNIQUE(user_id,role,platform_message_id));
+CREATE INDEX IF NOT EXISTS idx_messages_user_dialog_id ON messages(user_id,dialog_id,id);
+CREATE TABLE IF NOT EXISTS user_profiles(user_id TEXT PRIMARY KEY,profile_text TEXT NOT NULL DEFAULT '',version INTEGER NOT NULL DEFAULT 1,updated_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS memories(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id TEXT NOT NULL,kind TEXT NOT NULL,scope TEXT NOT NULL,content TEXT NOT NULL,tags TEXT NOT NULL DEFAULT '',importance INTEGER NOT NULL DEFAULT 3,status TEXT NOT NULL DEFAULT 'active',supersedes_id INTEGER,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,last_used_at INTEGER);
+CREATE INDEX IF NOT EXISTS idx_memories_user_scope_status ON memories(user_id,scope,status);
+CREATE INDEX IF NOT EXISTS idx_memories_user_kind_status ON memories(user_id,kind,status);
+CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(content,tags,content='memories',content_rowid='id');
+CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN INSERT INTO memories_fts(rowid,content,tags) VALUES(new.id,new.content,new.tags); END;
+CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN INSERT INTO memories_fts(memories_fts,rowid,content,tags) VALUES('delete',old.id,old.content,old.tags); END;
+CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN INSERT INTO memories_fts(memories_fts,rowid,content,tags) VALUES('delete',old.id,old.content,old.tags); INSERT INTO memories_fts(rowid,content,tags) VALUES(new.id,new.content,new.tags); END;
+CREATE TABLE IF NOT EXISTS scheduled_jobs(id TEXT PRIMARY KEY,user_id TEXT NOT NULL,kind TEXT NOT NULL,schedule_kind TEXT NOT NULL,cron_expr TEXT,timezone TEXT NOT NULL,run_at INTEGER,prompt TEXT NOT NULL,enabled INTEGER NOT NULL DEFAULT 1,next_run_at INTEGER,grace_secs INTEGER NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,job_json TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_scheduled_due ON scheduled_jobs(enabled,next_run_at);
+CREATE TABLE IF NOT EXISTS scheduled_runs(id INTEGER PRIMARY KEY AUTOINCREMENT,job_id TEXT NOT NULL,scheduled_at INTEGER NOT NULL,state TEXT NOT NULL,claimed_at INTEGER,started_at INTEGER,finished_at INTEGER,last_error TEXT,UNIQUE(job_id,scheduled_at));
+CREATE TABLE IF NOT EXISTS turn_retries(user_id TEXT PRIMARY KEY,message_id TEXT NOT NULL,ids_json TEXT NOT NULL,created_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS memory_cursors(user_id TEXT PRIMARY KEY,last_message_id INTEGER NOT NULL DEFAULT 0,completed_turns INTEGER NOT NULL DEFAULT 0,last_turn_at INTEGER NOT NULL DEFAULT 0,pending INTEGER NOT NULL DEFAULT 0,distill_failures INTEGER NOT NULL DEFAULT 0,next_distill_at INTEGER NOT NULL DEFAULT 0);
+"#;

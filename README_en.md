@@ -1,3 +1,5 @@
+> This version connects directly to the official Codex daemon over WebSocket on its Unix socket, with SQLite durable queues and a shared two-slot scheduler. See the updated architecture, configuration and command documentation for current behavior.
+
 <div align="center">
 
 <img src="./assets/banner.svg" width="600" alt="CodexClaw">
@@ -49,220 +51,47 @@ Some other ramblings can be found in this [Blog](https://rhapsody0x1.github.io/p
 
 ## Feature Highlights
 
-- **Session Management** &mdash; Parallel foreground/background multi-session support, with save, restore, and import of system Codex sessions
-- **Scheduled Tasks** &mdash; Built-in cron scheduler supporting reminders, Codex execution, shell scripts, and interactive multi-turn conversations
-- **Memory Distillation** &mdash; (Experimental) Automatic background extraction of memories from conversations, injected into subsequent prompts
-- **Approval Workflow** &mdash; Requests user approval via QQ before Codex executes sensitive operations, with per-session auto-approval support
-- **Self-Update** &mdash; Send `/self-update` via QQ to pull the latest code, compile, and hot-replace
+- Direct WebSocket-over-UDS connection to the pinned Codex daemon, with connection recovery.
+- Two global Codex slots and one per user; owner-bound approval, interrupt, settings and workspaces.
+- SQLite durable inbox/outbox, QQ event deduplication and restart recovery.
+- The first idle message starts immediately; ordinary messages received during a reply stay in the durable inbox and are merged into the next follow-up turn.
+- Foreground/background sessions, save, rename and owner-only resume; dynamic model menus.
+- Plain reminders and ephemeral Codex tasks, with grace windows and no historical catch-up.
+- Owner-bound memory CRUD, FTS history search and batch/idle distillation; separate IDENTITY / CHARACTER / BEHAVIOR responsibilities.
+- Attachment quotas and retention that protects unfinished requests.
 
-## Quick Start
+## Setup
 
-> For the complete deployment guide, see [docs/getting-started_en.md](docs/getting-started_en.md)
-
-1. Set up Codex login credentials or API key on the device where you want to deploy CodexClaw, and confirm that you can have a normal conversation with Codex in the TUI launched by the `codex` command;
-
-2. Go to the [QQ Open Platform](https://q.qq.com/), and complete login and personal verification as required;
-
-3. On the "Home" page, click "Bot", then click "Create QQ Bot", and record the obtained AppID and AppSecret for later use;
-    ![image-20260410150111815](./assets/image-20260410150111815.png)
-4. Return to the previous home page and enter the advanced settings page of your newly created bot;
-    ![image-20260410150217404](./assets/image-20260410150217404.png)
-
-5. Scroll down the left sidebar, find "Callback Configuration", click "Select All" for private message events, and save;
-    ![image-20260410150539552](./assets/image-20260410150539552.png)
-
-6. Fill in the AppID and AppSecret obtained in step 3 into the prompt below and send it to Codex. It will help you complete the rest of the work. Note that since system service installation and similar operations are involved, Codex **may request to execute some privileged commands -- please carefully review the safety of these commands. The author assumes no responsibility for any losses caused thereby**. If you do not want to expose your secrets to Codex, you can also ask Codex to guide you through the manual deployment process.
-
-```plain
-Help me deploy CodexClaw on this machine: https://github.com/Rhapsody0x1/CodexClaw . I have obtained the AppId: {} and AppSecret: {} you need. Then register it as a system service and provide me with commands to manage its enabled state.
-```
-
-7. By default, CodexClaw starts Codex in workspace-write sandbox mode with network access enabled, which provides some protection for your device. However, due to security mechanisms on various platforms, the sandbox may prevent some of Codex's capabilities from functioning properly. Issues the author has observed so far:
-
-    - On macOS, Playwright cannot be used to control browsers due to the Seatbelt mechanism;
-    - On Linux, system-level commands like apt cannot be invoked due to security mechanisms;
-
-    ~~If possible, consider running Codex in danger-full-access mode on an isolated VM/VPS, which can better leverage Codex's capabilities. As for how to modify the configuration, you can ask the ever-capable Codex ; )~~ The project has now migrated to Codex App Server, which can request the user to approve commands that exceed sandbox permissions.
-
-## Command Cheat Sheet
-
-> For the complete command reference, see [docs/commands_en.md](docs/commands_en.md)
-
-If you want to take advantage of the quick commands provided by the QQ official bot platform, you can manually add the following commands to the command list. Of course, not adding them does not affect their normal usage.
-
-| Command | Description |
-|---------|-------------|
-| `/help` | View the command list |
-| `/status` | View current session status |
-| `/new [dir]` | Create a new foreground session |
-| `/stop` | End the current session |
-| `/sessions` | List historical sessions |
-| `/model [name]` | Set or view the model |
-| `/compact` | Compress session context |
-| `/self-update` | Compile and hot-replace the binary |
-
-<details>
-<summary>More Commands</summary>
-
-- `/interrupt`: Stop the current run without ending the session
-- `/lang [en|zh]`: Switch interface language
-- `/fast [on|off]`: Toggle Fast mode
-- `/context [1m|standard]`: Set context mode
-- `/reasoning [low|medium|high|xhigh]`: Set reasoning depth
-- `/verbose [on|off]`: Toggle verbose output
-- `/save`: Explicitly save the current foreground session
-- `/bg [alias]`: Move the current session to the background
-- `/fg [alias]`: Switch to a named or the most recent background session
-- `/resume <id>`: Resume a disk session
-- `/import`: Import system Codex sessions
-- `/loadbg <id> [alias]`: Load a session to the background
-- `/rename <old> <new>`: Rename a background label
-- `/alias`: Manage command aliases
-- `/approvals`: Toggle approval policy
-- `/approve`: Approve a pending request
-- `/deny`: Deny a pending request
-- `/plan`: Enter plan mode
-- `/cron`: Manage scheduled tasks
-
-</details>
-
-## Scheduled Tasks
-
-CodexClaw includes a built-in cron scheduler that supports the following types of tasks:
-
-| Type | Description |
-|------|-------------|
-| `reminder` | Send a reminder message at a specified time |
-| `codex` | Execute a Codex task at a scheduled time |
-| `shell` | Run a shell command or script on a schedule |
-| `interactive` | Start an interactive multi-turn conversation on a schedule |
-
-> For the complete scheduler reference, see [docs/scheduler_en.md](docs/scheduler_en.md)
-
-## Runtime Files
-
-| Path | Description |
-|------|-------------|
-| `~/.codex-claw/codexclaw.toml` | Main configuration file |
-| `~/.codex-claw/data/` | Runtime data directory |
-| `~/.codex-claw/.codex/` | Independent Codex runtime directory |
-| `~/.codex-claw/data/session/` | Session storage |
-| `~/.codex-claw/data/memory/` | Memory distillation data |
-| `~/.codex-claw/data/scheduler/` | Scheduler persistence data |
-
-## Documentation
-
-| Document | 中文 |
-|----------|------|
-| [Getting Started](docs/getting-started_en.md) | [快速入门](docs/getting-started.md) |
-| [Command Reference](docs/commands_en.md) | [命令参考](docs/commands.md) |
-| [Configuration Reference](docs/configuration_en.md) | [配置参考](docs/configuration.md) |
-| [Scheduler](docs/scheduler_en.md) | [定时任务](docs/scheduler.md) |
-| [Architecture](docs/architecture_en.md) | [系统架构](docs/architecture.md) |
-| [Contributing](CONTRIBUTING_en.md) | [贡献指南](CONTRIBUTING.md) |
-
-## Contributing
-
-This project primarily evolves around the author's personal needs and interests. If you have new ideas or use cases, feel free to discuss them in the Discussion section. If you find a clear bug or compatibility issue, feel free to submit an Issue. For feature suggestions, the author does not guarantee acceptance, scheduling, or long-term maintenance.
-
-If your needs are highly personalized or do not fully align with the current roadmap, you can fork this repository directly and continue customizing on top of it. If you build something interesting, the author encourages you to **share functionality by sharing the Prompts or Plans you used**.
-
-For detailed development guidelines, see [CONTRIBUTING.md](CONTRIBUTING_en.md).
-
-## Deployment Instructions for Codex
-
-1. First check the basic environment, confirm that the current machine has internet access and that Rust and the Codex CLI are already installed:
+Install the configured Codex version (currently 0.159.2), prepare authentication in the configured `CODEX_HOME`, then prepare the daemon manually:
 
 ```bash
-uname -a
-whoami
-pwd
-rustc --version
-cargo --version
-codex --version
-git --version
+export CODEX_HOME="$HOME/.codex-claw/.codex"
+mkdir -p "$CODEX_HOME/app-server-daemon"
+printf '%s\n' '{"remoteControlEnabled":false,"shutdownGraceSeconds":60,"updater":{"autoUpdateEnabled":false,"updateIntervalMinutes":120}}' > "$CODEX_HOME/app-server-daemon/settings.json"
+codex app-server daemon update --from-cli -y
+codex app-server daemon start
+codex app-server daemon version
 ```
 
-2. If the Rust toolchain is missing, install Rust. If `codex` is missing, install it using the current official method first and require the user to complete login. Verification command. If this step fails, do not continue deployment; first ask the user to fix the Codex runtime environment and credential issues.
+Create a bot on the [QQ platform](https://q.qq.com/) and enable direct-message events. Copy `config/codexclaw.example.toml` to `~/.codex-claw/codexclaw.toml` and fill in your credentials.
 
 ```bash
-codex exec --json "reply with exactly: ok"
-```
-
-3. Confirm that the system Codex directory `~/.codex` already exists and contains at least `config.toml` and `auth.json`. On first startup, `codex-claw` will copy these files along with `skills/` to `~/.codex-claw/.codex/` as an independent runtime directory.
-
-4. Deploy using the user's home directory (no elevated privileges required), for example:
-
-```bash
-mkdir -p ~/.codex-claw
-cd ~/.codex-claw
-git clone https://github.com/Rhapsody0x1/CodexClaw.git repo
-cd repo
-```
-
-If the directory already contains the repository, instead do:
-
-```bash
-cd ~/.codex-claw/repo
-git pull --ff-only
-```
-
-5. Create the runtime configuration file, e.g. `~/.codex-claw/codexclaw.toml`. Write the user-provided `AppID` and `AppSecret` into the corresponding fields:
-
-```toml
-[general]
-data_dir = "~/.codex-claw/data"
-system_codex_home = "~/.codex"
-codex_home_global = "~/.codex-claw/.codex"
-default_workspace_dir = "~/.codex-claw/data/session/workspace"
-codex_binary = "codex"
-default_model = "gpt-5.4"
-default_reasoning_effort = "medium"
-self_repo_dir = "~/.codex-claw/repo"
-self_build_command = "cargo build --release"
-self_binary_path = "~/.codex-claw/repo/target/release/codex-claw"
-
-[qq]
-app_id = "YOUR_APP_ID"
-app_secret = "YOUR_APP_SECRET"
-api_base_url = "https://sandbox.api.sgroup.qq.com"
-token_url = "https://bots.qq.com/app/getAppAccessToken"
-
-[scheduler]
-enabled = true
-tick_secs = 30
-default_tz = "Asia/Shanghai"
-max_concurrent_jobs = 4
-max_turn_secs = 600
-max_attempts = 3
-retry_backoff_secs = 30
-circuit_breaker_threshold = 5
-runs_retention = 30
-```
-
-6. First do a compile check, then build the release:
-
-```bash
-cd ~/.codex-claw/repo
-cargo check
-cargo build --release
-```
-
-7. Start once in the foreground to confirm the program can connect to the QQ Gateway normally and there are no obvious configuration errors:
-
-```bash
-cd ~/.codex-claw/repo
+CARGO_INCREMENTAL=0 cargo build --release --locked
 CODEX_CLAW_CONFIG=~/.codex-claw/codexclaw.toml ./target/release/codex-claw
 ```
 
-If the logs show access token retrieval failures, Gateway connection failures, or Codex startup failures, stop and fix the problem first before continuing with subsequent steps.
+CLI and daemon versions must match the pin. CodexClaw does not install, start or update the daemon. Update the bot manually with git pull/checkout, a release build and service restart.
 
-8. When registering as a "user-level auto-start service", handle flexibly based on the system environment (e.g. macOS `launchd`, Linux user-level `systemd`, or other init systems). Core requirements:
-- Working directory points to `~/.codex-claw/repo`
-- Set `CODEX_CLAW_CONFIG=~/.codex-claw/codexclaw.toml`
-- Startup command is `~/.codex-claw/repo/target/release/codex-claw`
-- Run as the current logged-in user, no root required
+## Commands and Data
 
-9. Enable and start the service (commands vary by system). Since `/self-update` replaces the currently running binary and exits the current process, it is recommended to let an external service manager handle restarting.
+Use `/help` or `/help all`; see [commands](docs/commands_en.md), [scheduler](docs/scheduler_en.md), [configuration](docs/configuration_en.md) and [setup](docs/getting-started_en.md).
 
-10. Finally, remind the user to send a normal private message from the QQ client for integration testing, and check the service logs.
+State is `~/.codex-claw/data/state.db`. Workspaces and attachments are under `~/.codex-claw/users/<hashed-user-id>/workspace/` and `inbox/`. Character configuration uses `~/.codex-claw/BEHAVIOR.md`, `IDENTITY.md`, and `CHARACTER.md`: IDENTITY defines who the character is, CHARACTER holds background/personality/relationship/voice examples, and BEHAVIOR defines chat/task behavior. If `BEHAVIOR.md` is absent, CodexClaw uses the embedded default chat/task/anti-slop rules; creating the file overrides that default. Character files are injected only when a new conversation starts; legacy `SOUL.md` is no longer read.
+
+Legacy session/job JSON and USER.md/MEMORY.md migrate once and retain `.legacy.bak` backups. Local Codex rollout import, binary self-update, command macros, interactive scheduled conversations and ShadowWorker are removed.
+
+## Development
+
+See [architecture](docs/architecture_en.md) and [CONTRIBUTING.md](CONTRIBUTING.md). CI includes formatting, clippy and unit tests. Authenticated daemon smoke is an explicit workflow job; a Codex pin upgrade requires its successful result.
+
+License: [MIT](LICENSE).

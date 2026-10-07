@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      run_codex_smoke:
+        description: Run the authenticated Codex baseline smoke test
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: '0'
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup toolchain install 1.99.0 --profile minimal --component rustfmt --component clippy
+      - name: Format
+        run: cargo +1.99.0 fmt --check
+      - name: Clippy
+        run: cargo +1.99.0 clippy --locked --all-targets --all-features -- -D warnings
+      - name: Tests
+        run: cargo +1.99.0 test --locked --all
+
+  codex-smoke:
+    if: github.event_name == 'workflow_dispatch' && inputs.run_codex_smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CODEX_HOME: ${{ runner.temp }}/codexclaw-smoke
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup toolchain install 1.99.0 --profile minimal
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install pinned Codex candidate
+        run: npm install -g @openai/codex@0.159.2
+      - name: Verify CLI version
+        run: test "$(codex --version)" = 'codex-cli 0.159.2'
+      - name: Prepare smoke credentials
+        env:
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+        run: |
+          test -n "$CODEX_AUTH_JSON"
+          install -d -m 700 "$CODEX_HOME"
+          umask 077
+          printf '%s' "$CODEX_AUTH_JSON" > "$CODEX_HOME/auth.json"
+      - name: Start pinned daemon
+        run: |
+          install -d -m 700 "$CODEX_HOME/app-server-daemon"
+          printf '%s\n' '{"remoteControlEnabled":false,"shutdownGraceSeconds":60,"updater":{"autoUpdateEnabled":false,"updateIntervalMinutes":120}}' > "$CODEX_HOME/app-server-daemon/settings.json"
+          codex app-server daemon update --from-cli -y
+          codex app-server daemon start
+          codex app-server daemon version | jq -e '.cliVersion == "0.159.2" and .appServerVersion == "0.159.2"'
+      - name: Run daemon proxy smoke
+        run: cargo +1.99.0 test --locked --test app_server_smoke -- --ignored --nocapture
+      - name: Remove smoke credentials
+        if: always()
+        run: |
+          codex app-server daemon stop || true
+          rm -f "$CODEX_HOME/auth.json"

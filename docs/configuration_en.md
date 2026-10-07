@@ -1,157 +1,49 @@
-*Read this in: [English](configuration_en.md) | [中文](configuration.md)*
+# Configuration
 
-# CodexClaw Configuration Reference
-
-This document describes all configuration options for CodexClaw. The configuration file uses the TOML format.
-
----
-
-## Config Loading Order
-
-CodexClaw looks for a configuration file in the following order, using the first one found:
-
-1. The path specified by the `CODEX_CLAW_CONFIG` environment variable (if set)
-2. `./codexclaw.toml` in the current working directory
-3. Fallback to `~/.codex-claw/codexclaw.toml`
-
-### Startup Validation
-
-The following fields are required and must not be empty strings; otherwise the program will fail to start:
-
-- `qq.app_id`
-- `qq.app_secret`
-- `general.self_build_command`
-
----
-
-## Path Handling Notes
-
-- **Tilde Expansion**: A leading `~` is expanded for regular path fields. A relative `self_binary_path` is first joined to the normalized `self_repo_dir`, so do not use `~/...` in that field.
-- **Canonicalization**: Loading attempts to canonicalize paths. If a target does not exist yet, the absolute path is retained and may still contain `..` components.
-- **Relative Paths**: Regular relative paths use the CodexClaw process's current working directory; `self_binary_path` is relative to `self_repo_dir`.
-
----
-
-## `[general]` — General Settings
-
-Controls runtime directories, Codex CLI invocation method, and self-update behavior.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `timezone` | String (IANA tz) | `"Asia/Shanghai"` | Timezone for user-facing timestamps. Validated against chrono_tz at startup. |
-| `data_dir` | PathBuf | `~/.codex-claw/data` | Root for all persisted runtime data |
-| `system_codex_home` | PathBuf | `~/.codex` | System Codex installation directory |
-| `codex_home_global` | PathBuf | `~/.codex-claw/.codex` | Home directory for global codex config |
-| `default_workspace_dir` | PathBuf | `~/.codex-claw/data/session/workspace` | Default workspace for new temporary sessions |
-| `codex_binary` | String | `"codex"` | Name or path of the codex CLI binary; a bare command name must resolve through PATH |
-| `default_model` | String | `"gpt-5.4"` | Default model for new sessions |
-| `default_reasoning_effort` | ReasoningEffort | `"medium"` | Default reasoning effort; valid values: `none` / `minimal` / `low` / `medium` / `high` / `xhigh` |
-| `self_repo_dir` | PathBuf | `"."` | CodexClaw repository root directory (used by the `/self-update` command) |
-| `self_build_command` | String | `"cargo build --release"` | Build command to run during self-update (**required, must not be empty**) |
-| `self_binary_path` | PathBuf | `"./target/release/codex-claw"` | Path to the build output binary, relative to self_repo_dir |
-
----
-
-## `[qq]` — QQ Bot Settings
-
-Configures authentication credentials and API endpoints for the QQ Open Platform.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `app_id` | String | **(required)** | QQ bot AppID |
-| `app_secret` | String | **(required)** | QQ bot AppSecret |
-| `api_base_url` | String | `"https://sandbox.api.sgroup.qq.com"` | QQ API endpoint. For production, change to `https://api.sgroup.qq.com` |
-| `token_url` | String | `"https://bots.qq.com/app/getAppAccessToken"` | Token acquisition endpoint |
-
-> **Note**: The default `api_base_url` points to the sandbox environment. When deploying to production, be sure to change it to `https://api.sgroup.qq.com`.
-
----
-
-## `[shadow]` — Shadow Distillation Settings
-
-Controls the behavior of the background memory distillation module. When `enabled = false`, the entire shadow subsystem will not run.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `enabled` | bool | `true` | Whether to enable background memory distillation |
-| `memory_min_user_chars` | usize | `40` | Minimum user message length (in characters) to trigger memory distillation |
-| `memory_reasoning` | String | `"low"` | Reasoning depth used for memory distillation |
-| `memory_model` | String | `""` | Model used for memory distillation. Leave empty to follow the current session model |
-| `memory_deadline_secs` | u64 | `120` | Timeout for a single distillation run (in seconds) |
-
----
-
-## `[scheduler]` — Scheduler Settings
-
-Controls the task scheduler. The scheduler supports cron-expression-based task triggering and includes built-in retry and circuit-breaker mechanisms.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `enabled` | bool | `true` | Whether to enable the scheduler |
-| `tick_secs` | u64 | `30` | Scheduler polling interval (in seconds) |
-| `default_tz` | String | `"Asia/Shanghai"` | Default timezone for cron jobs (IANA timezone name). Unlike general.timezone, this is not validated at startup and is passed through directly |
-| `max_concurrent_jobs` | usize | `4` | Maximum number of concurrent jobs |
-| `max_turn_secs` | u64 | `600` | Timeout for a single job execution (in seconds) |
-| `max_attempts` | u32 | `3` | Maximum number of retries per run |
-| `retry_backoff_secs` | u64 | `30` | Retry backoff interval (in seconds) |
-| `circuit_breaker_threshold` | u32 | `5` | Consecutive failure threshold; the job is auto-disabled after reaching this count |
-| `runs_retention` | usize | `30` | Number of recent run logs to retain |
-
----
-
-## Full Example
-
-Below is a complete configuration file containing all fields, which can be used as a starting template. The authoritative configuration template is `config/codexclaw.example.toml` in the repository; refer to that file as the canonical source.
+Load order: CODEX_CLAW_CONFIG, ./codexclaw.toml, then ~/.codex-claw/codexclaw.toml.
 
 ```toml
-# ============================================================
-#  CodexClaw Configuration File
-#  Copy this file to one of the following locations:
-#    - ./codexclaw.toml (current working directory)
-#    - ~/.codex-claw/codexclaw.toml (user home directory)
-#  Or specify the path via the CODEX_CLAW_CONFIG environment variable.
-# ============================================================
-
-# --- General Settings ---------------------------------------------------
-[general]
-timezone               = "Asia/Shanghai"
-data_dir              = "~/.codex-claw/data"
-system_codex_home     = "~/.codex"
-codex_home_global     = "~/.codex-claw/.codex"
-default_workspace_dir = "~/.codex-claw/data/session/workspace"
-codex_binary          = "codex"
-default_model         = "gpt-5.4"
-default_reasoning_effort = "medium"      # none | minimal | low | medium | high | xhigh
-self_repo_dir         = "."
-self_build_command    = "cargo build --release"
-self_binary_path      = "./target/release/codex-claw"
-
-# --- QQ Bot --------------------------------------------------
 [qq]
-app_id       = "YOUR_APP_ID"             # (required) Replace with your AppID
-app_secret   = "YOUR_APP_SECRET"         # (required) Replace with your AppSecret
-api_base_url = "https://sandbox.api.sgroup.qq.com"   # For production, change to https://api.sgroup.qq.com
-token_url    = "https://bots.qq.com/app/getAppAccessToken"
+app_id = "YOUR_QQ_APP_ID"
+app_secret = "YOUR_QQ_APP_SECRET"
+allowed_users = [] # Recommended: QQ openids allowed to use the bot; empty allows all C2C users
 
-# --- Shadow Distillation ---------------------------------------------------
-[shadow]
-enabled              = true
-memory_min_user_chars = 40               # Memory distillation not triggered if user message is shorter than this
-memory_reasoning     = "low"
-memory_model         = ""                # Leave empty = follow session model
-memory_deadline_secs = 120
+[codex]
+expected_version = "0.159.2"
 
-# --- Scheduler -----------------------------------------------------
+[general]
+data_dir = "~/.codex-claw/data"
+codex_home_global = "~/.codex-claw/.codex"
+system_codex_home = "~/.codex"
+codex_binary = "codex"
+timezone = "Asia/Shanghai"
+
+[runtime]
+max_concurrent_codex = 2
+max_concurrent_per_user = 1
+max_concurrent_scheduled = 1
+max_concurrent_memory = 1
+
 [scheduler]
-enabled                  = true
-tick_secs                = 30
-default_tz               = "Asia/Shanghai"
-max_concurrent_jobs      = 4
-max_turn_secs            = 600           # 10 minutes
-max_attempts             = 3
-retry_backoff_secs       = 30
-circuit_breaker_threshold = 5            # Auto-disable after 5 consecutive failures
-runs_retention           = 30
+agent_misfire_grace_secs = 600
+reminder_misfire_grace_secs = 1800
+catch_up_missed = false
+
+[memory]
+model = "gpt-5.6-luna"
+distill_after_turns = 12
+distill_idle_secs = 120
+relevant_limit = 8
+hot_memory_max_chars = 4000
+single_memory_max_chars = 300
+
+[attachments]
+max_file_bytes = 33554432
+per_user_quota_bytes = 268435456
+retention_hours = 24
+
 ```
 
----
+Global concurrency is at most 2; per-user, scheduled and memory limits must be 1. Catch-up must remain false. An empty model uses the daemon default. Model menus use model/list with a 5-minute, connection-sensitive cache. QQ settings write SQLite, not shared config.toml.
+
+BEHAVIOR.md is limited to 8000 characters, IDENTITY.md to 500, CHARACTER.md to 16000, profile to 4000, and hot memory to 4000; a memory entry has at most 300. The three character files are injected only when a new thread is created, so an existing thread stays pinned to its original character version; legacy SOUL.md is no longer read. If BEHAVIOR.md is missing, the embedded default is used; a runtime file overrides it. Attachments default to 32 MiB each, 256 MiB per user and 24-hour retention. Output files must stay in the current user's directories. Operators prepare and start the pinned official daemon separately with the same CODEX_HOME.

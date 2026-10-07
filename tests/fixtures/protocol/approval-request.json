@@ -1,0 +1,9 @@
+{
+  "threadId": "thread-a",
+  "turnId": "turn-a",
+  "itemId": "item-a",
+  "command": "pwd",
+  "cwd": "/home/bot/users/a/workspace",
+  "reason": "Inspect workspace",
+  "futureField": true
+}

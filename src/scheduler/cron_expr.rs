@@ -25,13 +25,6 @@ pub(crate) fn next_after(kind: &CronKind, now: DateTime<Utc>) -> Result<Option<D
     }
 }
 
-pub(crate) fn due_or_past(kind: &CronKind, now: DateTime<Utc>) -> bool {
-    match kind {
-        CronKind::OneShot { at } => *at <= now,
-        CronKind::Recurring { .. } => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};

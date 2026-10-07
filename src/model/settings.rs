@@ -8,8 +8,6 @@ use std::{collections::BTreeMap, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::cron::CronJob;
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum ReasoningEffort {
@@ -20,27 +18,17 @@ pub enum ReasoningEffort {
     Medium,
     High,
     Xhigh,
+    Max,
 }
 
 impl ReasoningEffort {
-    pub(crate) fn parse(input: &str) -> Option<Self> {
-        match input.trim().to_ascii_lowercase().as_str() {
-            "none" => Some(Self::None),
-            "minimal" => Some(Self::Minimal),
-            "low" => Some(Self::Low),
-            "medium" => Some(Self::Medium),
-            "high" => Some(Self::High),
-            "xhigh" => Some(Self::Xhigh),
-            _ => None,
-        }
-    }
-
     pub(crate) fn parse_supported(input: &str) -> Option<Self> {
         match input.trim().to_ascii_lowercase().as_str() {
             "low" => Some(Self::Low),
             "medium" => Some(Self::Medium),
             "high" => Some(Self::High),
             "xhigh" => Some(Self::Xhigh),
+            "max" => Some(Self::Max),
             _ => None,
         }
     }
@@ -58,6 +46,7 @@ impl ReasoningEffort {
             Self::Medium => "medium",
             Self::High => "high",
             Self::Xhigh => "xhigh",
+            Self::Max => "max",
             Self::None | Self::Minimal => "low",
         }
     }
@@ -111,7 +100,7 @@ impl ApprovalPolicySetting {
         match input.trim().to_ascii_lowercase().replace('_', "-").as_str() {
             "never" | "off" | "关" | "关闭" => Some(Self::Never),
             "on-request" | "on" | "开" | "开启" | "ask" => Some(Self::OnRequest),
-            "unless-trusted" | "strict" | "严格" => Some(Self::UnlessTrusted),
+            "untrusted" | "unless-trusted" | "strict" | "严格" => Some(Self::UnlessTrusted),
             "guardian-subagent" | "guardian" | "guardian_subagent" | "守护" => {
                 Some(Self::GuardianSubagent)
             }
@@ -147,6 +136,14 @@ pub enum ContextMode {
 }
 
 impl ContextMode {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "standard" | "272k" => Some(Self::Standard),
+            "1m" => Some(Self::OneM),
+            _ => None,
+        }
+    }
+    #[cfg(test)]
     pub(crate) const STANDARD_CONTEXT_WINDOW: u64 = 272_000;
 
     pub(crate) fn label(self) -> &'static str {
@@ -156,6 +153,7 @@ impl ContextMode {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn from_model_context_window(window: u64) -> Self {
         if window > Self::STANDARD_CONTEXT_WINDOW {
             Self::OneM
@@ -184,7 +182,7 @@ pub(crate) struct SessionSettings {
 }
 
 pub(crate) fn default_language() -> String {
-    "en".to_string()
+    "zh".to_string()
 }
 
 impl Default for SessionSettings {
@@ -246,26 +244,6 @@ pub(crate) struct DialogProfile {
     pub(crate) reasoning_effort: Option<ReasoningEffort>,
     pub(crate) service_tier: Option<ServiceTier>,
     pub(crate) context_mode: Option<ContextMode>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub(crate) struct ImportedSessionProfile {
-    pub(crate) workspace_dir: PathBuf,
-    pub(crate) model_override: Option<String>,
-    pub(crate) reasoning_effort: Option<ReasoningEffort>,
-    pub(crate) service_tier: Option<ServiceTier>,
-    pub(crate) context_mode: Option<ContextMode>,
-}
-
-impl ImportedSessionProfile {
-    pub(crate) fn dialog_profile(&self) -> DialogProfile {
-        DialogProfile {
-            model_override: self.model_override.clone(),
-            reasoning_effort: self.reasoning_effort,
-            service_tier: self.service_tier,
-            context_mode: self.context_mode,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -362,13 +340,6 @@ impl DialogState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) struct CommandAlias {
-    pub(crate) name: String,
-    pub(crate) commands: Vec<String>,
-    pub(crate) created_at: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum PendingSetting {
     Model,
@@ -378,28 +349,10 @@ pub(crate) enum PendingSetting {
     Verbose,
     Lang,
     SessionsProjects,
-    SessionsSessions {
-        project_key: String,
-        page: usize,
-    },
-    ImportProjects,
-    ImportSessions {
-        project_key: String,
-        page: usize,
-    },
+    SessionsSessions { project_key: String, page: usize },
     Fg,
     ResumeProjects,
-    ResumeSessions {
-        project_key: String,
-        page: usize,
-    },
-    LoadbgProjects,
-    LoadbgSessions {
-        project_key: String,
-        page: usize,
-        #[serde(default)]
-        alias: Option<String>,
-    },
+    ResumeSessions { project_key: String, page: usize },
     Approvals,
     Plan,
     ResumeRecovery,
@@ -459,13 +412,6 @@ impl PendingSetting {
                     "/sessions"
                 }
             }
-            ImportProjects | ImportSessions { .. } => {
-                if zh {
-                    "/导入"
-                } else {
-                    "/import"
-                }
-            }
             Fg => {
                 if zh {
                     "/前台"
@@ -478,13 +424,6 @@ impl PendingSetting {
                     "/恢复"
                 } else {
                     "/resume"
-                }
-            }
-            LoadbgProjects | LoadbgSessions { .. } => {
-                if zh {
-                    "/载入后台"
-                } else {
-                    "/loadbg"
                 }
             }
             Approvals => {
@@ -527,18 +466,12 @@ pub(crate) struct UserSessionState {
     pub(crate) last_projects_view: Vec<String>,
     #[serde(default)]
     pub(crate) last_sessions_view: Vec<String>,
-    #[serde(default)]
-    pub(crate) last_import_projects_view: Vec<String>,
     /// Job ids as rendered by the latest `/cron list`, so numeric arguments
     /// keep meaning the row the user actually saw.
     #[serde(default)]
     pub(crate) last_cron_view: Vec<String>,
     #[serde(default)]
-    pub(crate) last_import_sessions_view: Vec<String>,
-    #[serde(default)]
     pub(crate) saved_local_session_ids: Vec<String>,
-    #[serde(default)]
-    pub(crate) command_aliases: BTreeMap<String, CommandAlias>,
     #[serde(default)]
     pub(crate) pending_setting: Option<PendingSetting>,
     /// Alias reserved by `/bg <alias>` while the foreground's first turn was
@@ -562,11 +495,8 @@ impl UserSessionState {
             alias_seq: 0,
             last_projects_view: Vec::new(),
             last_sessions_view: Vec::new(),
-            last_import_projects_view: Vec::new(),
             last_cron_view: Vec::new(),
-            last_import_sessions_view: Vec::new(),
             saved_local_session_ids: Vec::new(),
-            command_aliases: BTreeMap::new(),
             pending_setting: None,
             pending_park_alias: None,
         }
@@ -576,7 +506,7 @@ impl UserSessionState {
     /// only a *saved* foreground dialog carries one; temporary dialogs always
     /// resolve against the user's own settings.
     pub(crate) fn foreground_profile(&self) -> Option<&DialogProfile> {
-        if self.foreground.saved {
+        if self.foreground.session_id.is_some() {
             self.foreground.profile.as_ref()
         } else {
             None
@@ -587,23 +517,8 @@ impl UserSessionState {
     /// four runtime overrides (model / reasoning / tier / context) replaced by
     /// the saved foreground dialog profile, if any.
     pub(crate) fn effective_settings(&self) -> SessionSettings {
-        let mut base = self.settings.clone();
-        base.model_override = None;
-        base.reasoning_effort = None;
-        base.service_tier = None;
-        base.context_mode = None;
-        base.merged_with_profile(self.foreground_profile())
+        self.settings.merged_with_profile(self.foreground_profile())
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub(crate) struct PersistedSessionState {
-    #[serde(default)]
-    pub(crate) users: BTreeMap<String, UserSessionState>,
-    #[serde(default)]
-    pub(crate) imported_profiles: BTreeMap<String, ImportedSessionProfile>,
-    #[serde(default)]
-    pub(crate) cron_jobs: BTreeMap<String, CronJob>,
 }
 
 #[cfg(test)]
@@ -632,5 +547,16 @@ mod tests {
             ContextMode::from_model_context_window(128_000),
             ContextMode::Standard
         );
+    }
+}
+
+#[cfg(test)]
+mod reasoning_effort_tests {
+    use super::ReasoningEffort;
+
+    #[test]
+    fn reasoning_effort_supports_max() {
+        assert_eq!(ReasoningEffort::parse_supported("max"), Some(ReasoningEffort::Max));
+        assert_eq!(ReasoningEffort::Max.as_str(), "max");
     }
 }

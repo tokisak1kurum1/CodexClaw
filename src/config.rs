@@ -1,340 +1,193 @@
-use std::path::{Path, PathBuf};
-
+use crate::{model::settings::ReasoningEffort, util::path::home_dir};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-
-use crate::model::settings::ReasoningEffort;
-use crate::util::{layout::DataLayout, path::home_dir};
-
+use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     #[serde(default)]
     pub general: GeneralConfig,
     pub qq: QqConfig,
     #[serde(default)]
-    pub shadow: ShadowSection,
+    pub codex: CodexConfig,
+    #[serde(default)]
+    pub runtime: RuntimeConfig,
     #[serde(default)]
     pub scheduler: SchedulerConfig,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ShadowSection {
-    #[serde(default = "default_shadow_enabled")]
-    pub enabled: bool,
-    #[serde(default = "default_shadow_min_user_chars")]
-    pub memory_min_user_chars: usize,
-    #[serde(default = "default_shadow_reasoning")]
-    pub memory_reasoning: String,
     #[serde(default)]
-    pub memory_model: String,
-    #[serde(default = "default_shadow_deadline_secs")]
-    pub memory_deadline_secs: u64,
-}
-
-impl Default for ShadowSection {
-    fn default() -> Self {
-        Self {
-            enabled: default_shadow_enabled(),
-            memory_min_user_chars: default_shadow_min_user_chars(),
-            memory_reasoning: default_shadow_reasoning(),
-            memory_model: String::new(),
-            memory_deadline_secs: default_shadow_deadline_secs(),
-        }
-    }
-}
-
-fn default_shadow_enabled() -> bool {
-    true
-}
-fn default_shadow_min_user_chars() -> usize {
-    40
-}
-fn default_shadow_reasoning() -> String {
-    "low".to_string()
-}
-fn default_shadow_deadline_secs() -> u64 {
-    120
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SchedulerConfig {
-    #[serde(default = "default_scheduler_enabled")]
-    pub enabled: bool,
-    #[serde(default = "default_scheduler_tick_secs")]
-    pub tick_secs: u64,
-    #[serde(default = "default_scheduler_default_tz")]
-    pub default_tz: String,
-    #[serde(default = "default_scheduler_max_concurrent_jobs")]
-    pub max_concurrent_jobs: usize,
-    #[serde(default = "default_scheduler_max_turn_secs")]
-    pub max_turn_secs: u64,
-    #[serde(default = "default_scheduler_max_attempts")]
-    pub max_attempts: u32,
-    #[serde(default = "default_scheduler_retry_backoff_secs")]
-    pub retry_backoff_secs: u64,
-    #[serde(default = "default_scheduler_circuit_breaker_threshold")]
-    pub circuit_breaker_threshold: u32,
-    #[serde(default = "default_scheduler_runs_retention")]
-    pub runs_retention: usize,
-}
-
-impl Default for SchedulerConfig {
-    fn default() -> Self {
-        Self {
-            enabled: default_scheduler_enabled(),
-            tick_secs: default_scheduler_tick_secs(),
-            default_tz: default_scheduler_default_tz(),
-            max_concurrent_jobs: default_scheduler_max_concurrent_jobs(),
-            max_turn_secs: default_scheduler_max_turn_secs(),
-            max_attempts: default_scheduler_max_attempts(),
-            retry_backoff_secs: default_scheduler_retry_backoff_secs(),
-            circuit_breaker_threshold: default_scheduler_circuit_breaker_threshold(),
-            runs_retention: default_scheduler_runs_retention(),
-        }
-    }
-}
-
-fn default_scheduler_enabled() -> bool {
-    true
-}
-fn default_scheduler_tick_secs() -> u64 {
-    30
-}
-fn default_scheduler_default_tz() -> String {
-    "Asia/Shanghai".to_string()
-}
-fn default_scheduler_max_concurrent_jobs() -> usize {
-    4
-}
-fn default_scheduler_max_turn_secs() -> u64 {
-    600
-}
-fn default_scheduler_max_attempts() -> u32 {
-    3
-}
-fn default_scheduler_retry_backoff_secs() -> u64 {
-    30
-}
-fn default_scheduler_circuit_breaker_threshold() -> u32 {
-    5
-}
-fn default_scheduler_runs_retention() -> usize {
-    30
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GeneralConfig {
-    #[serde(default = "default_data_dir")]
-    pub data_dir: PathBuf,
-    #[serde(default = "default_system_codex_home")]
-    pub system_codex_home: PathBuf,
-    #[serde(default = "default_global_codex_home")]
-    pub codex_home_global: PathBuf,
-    #[serde(default = "default_workspace_dir")]
-    pub default_workspace_dir: PathBuf,
-    #[serde(default = "default_codex_binary")]
-    pub codex_binary: String,
-    #[serde(default = "default_model")]
-    pub default_model: String,
-    /// IANA timezone every user-facing timestamp is rendered in (task
-    /// scheduling uses `scheduler.default_tz` instead).
-    #[serde(default = "default_display_timezone")]
-    pub timezone: String,
+    pub memory: MemoryConfig,
     #[serde(default)]
-    pub default_reasoning_effort: ReasoningEffort,
-    #[serde(default = "default_self_repo_dir")]
-    pub self_repo_dir: PathBuf,
-    #[serde(default = "default_self_build_command")]
-    pub self_build_command: String,
-    #[serde(default = "default_self_binary_path")]
-    pub self_binary_path: PathBuf,
+    pub attachments: AttachmentConfig,
 }
-
+macro_rules! section{($name:ident{$($field:ident:$ty:ty=$value:expr),*$(,)?})=>{#[derive(Debug,Clone,Serialize,Deserialize)]#[serde(default)]pub struct $name{$(pub $field:$ty),*}impl Default for $name{fn default()->Self{Self{$($field:$value),*}}}};}
+section!(CodexConfig {
+    expected_version: String = "0.159.2".into()
+});
+section!(RuntimeConfig {
+    max_concurrent_codex: usize = 2,
+    max_concurrent_per_user: usize = 1,
+    max_concurrent_scheduled: usize = 1,
+    max_concurrent_memory: usize = 1
+});
+section!(SchedulerConfig {
+    enabled: bool = true,
+    tick_secs: u64 = 5,
+    default_tz: String = "Asia/Shanghai".into(),
+    max_turn_secs: u64 = 600,
+    agent_misfire_grace_secs: i64 = 600,
+    reminder_misfire_grace_secs: i64 = 1800,
+    catch_up_missed: bool = false
+});
+section!(MemoryConfig {
+    model: String = "gpt-5.6-luna".into(),
+    distill_after_turns: i64 = 12,
+    distill_idle_secs: i64 = 120,
+    relevant_limit: usize = 8,
+    hot_memory_max_chars: usize = 4000,
+    single_memory_max_chars: usize = 300
+});
+section!(AttachmentConfig {
+    max_file_bytes: u64 = 32 * 1024 * 1024,
+    per_user_quota_bytes: u64 = 256 * 1024 * 1024,
+    retention_hours: i64 = 24
+});
+section!(GeneralConfig {
+    data_dir: PathBuf = home_dir().join(".codex-claw/data"),
+    system_codex_home: PathBuf = home_dir().join(".codex"),
+    codex_home_global: PathBuf = home_dir().join(".codex-claw/.codex"),
+    default_workspace_dir: PathBuf = home_dir().join(".codex-claw/users"),
+    codex_binary: String = "codex".into(),
+    default_model: String = String::new(),
+    timezone: String = "Asia/Shanghai".into(),
+    default_reasoning_effort: ReasoningEffort = ReasoningEffort::Medium
+});
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QqConfig {
     pub app_id: String,
     pub app_secret: String,
-    #[serde(default = "default_api_base_url")]
+    #[serde(default)]
+    pub allowed_users: Vec<String>,
+    #[serde(default = "api_url")]
     pub api_base_url: String,
-    #[serde(default = "default_token_url")]
+    #[serde(default = "token_url")]
     pub token_url: String,
 }
-
+fn api_url() -> String {
+    "https://api.sgroup.qq.com".into()
+}
+fn token_url() -> String {
+    "https://bots.qq.com/app/getAppAccessToken".into()
+}
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            general: GeneralConfig::default(),
+            general: Default::default(),
             qq: QqConfig {
                 app_id: String::new(),
                 app_secret: String::new(),
-                api_base_url: default_api_base_url(),
-                token_url: default_token_url(),
+                allowed_users: Vec::new(),
+                api_base_url: api_url(),
+                token_url: token_url(),
             },
-            shadow: ShadowSection::default(),
-            scheduler: SchedulerConfig::default(),
+            codex: Default::default(),
+            runtime: Default::default(),
+            scheduler: Default::default(),
+            memory: Default::default(),
+            attachments: Default::default(),
         }
     }
 }
-
-impl Default for GeneralConfig {
-    fn default() -> Self {
-        Self {
-            data_dir: default_data_dir(),
-            system_codex_home: default_system_codex_home(),
-            codex_home_global: default_global_codex_home(),
-            default_workspace_dir: default_workspace_dir(),
-            codex_binary: default_codex_binary(),
-            default_model: default_model(),
-            timezone: default_display_timezone(),
-            default_reasoning_effort: ReasoningEffort::default(),
-            self_repo_dir: default_self_repo_dir(),
-            self_build_command: default_self_build_command(),
-            self_binary_path: default_self_binary_path(),
-        }
-    }
-}
-
 impl AppConfig {
     pub fn load() -> Result<Self> {
-        let path = std::env::var("CODEX_CLAW_CONFIG")
+        let path = std::env::var_os("CODEX_CLAW_CONFIG")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("codexclaw.toml"));
-        if !path.exists() && path == *"codexclaw.toml" {
-            let fallback = default_codex_claw_root().join("codexclaw.toml");
-            if fallback.exists() {
-                return Self::load_from_path(&fallback);
-            }
-        }
-        Self::load_from_path(&path)
-    }
-
-    fn load_from_path(path: &Path) -> Result<Self> {
-        let raw = std::fs::read_to_string(path)
-            .with_context(|| format!("failed to read config file at {}", path.display()))?;
-        let config = toml::from_str::<Self>(&raw)
-            .with_context(|| format!("failed to parse TOML config at {}", path.display()))?;
+            .unwrap_or_else(|| {
+                let local = PathBuf::from("codexclaw.toml");
+                if local.exists() {
+                    local
+                } else {
+                    home_dir().join(".codex-claw/codexclaw.toml")
+                }
+            });
+        let config: Self = toml::from_str(
+            &std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?,
+        )?;
         config.validate()?;
         Ok(config)
     }
-
     fn validate(&self) -> Result<()> {
         anyhow::ensure!(
-            !self.qq.app_id.trim().is_empty(),
-            "qq.app_id must not be empty"
+            (1..=2).contains(&self.runtime.max_concurrent_codex),
+            "runtime.max_concurrent_codex must be 1 or 2"
         );
         anyhow::ensure!(
-            !self.qq.app_secret.trim().is_empty(),
-            "qq.app_secret must not be empty"
+            self.runtime.max_concurrent_per_user == 1
+                && self.runtime.max_concurrent_scheduled == 1
+                && self.runtime.max_concurrent_memory == 1,
+            "per-user, scheduled and memory limits must be 1"
+        );
+        anyhow::ensure!(!self.scheduler.catch_up_missed, "catch-up is not supported");
+        anyhow::ensure!(
+            !self.codex.expected_version.is_empty(),
+            "codex.expected_version is required"
+        );
+        let mut allowed = std::collections::HashSet::new();
+        anyhow::ensure!(
+            self.qq
+                .allowed_users
+                .iter()
+                .all(|user| {
+                    !user.is_empty() && user.trim() == user && allowed.insert(user.as_str())
+                }),
+            "qq.allowed_users must contain unique non-empty openids"
         );
         anyhow::ensure!(
             self.general.timezone.parse::<chrono_tz::Tz>().is_ok(),
-            "general.timezone is not a valid IANA timezone: {}",
-            self.general.timezone
+            "invalid timezone"
         );
         anyhow::ensure!(
-            !self.general.self_build_command.trim().is_empty(),
-            "general.self_build_command must not be empty"
+            self.scheduler.tick_secs > 0
+                && self.scheduler.max_turn_secs > 0
+                && self.scheduler.agent_misfire_grace_secs >= 0
+                && self.scheduler.reminder_misfire_grace_secs >= 0,
+            "scheduler timers must be positive"
+        );
+        anyhow::ensure!(
+            !self.memory.model.trim().is_empty()
+                && self.memory.distill_after_turns > 0
+                && self.memory.distill_idle_secs > 0
+                && self.memory.relevant_limit <= 8
+                && self.memory.hot_memory_max_chars <= 4000
+                && self.memory.single_memory_max_chars == 300,
+            "invalid memory limits"
+        );
+        anyhow::ensure!(
+            self.attachments.retention_hours > 0
+                && self.attachments.max_file_bytes > 0
+                && self.attachments.per_user_quota_bytes >= self.attachments.max_file_bytes,
+            "invalid attachment limits"
         );
         Ok(())
     }
-
-    /// Turn every configured path into an existing absolute path: expand `~`,
-    /// resolve against the current directory, create the parent and
-    /// canonicalize. `self_binary_path` is special-cased because a relative
-    /// value there is meant to be read against `self_repo_dir`, not the cwd.
     pub async fn normalize_paths(&mut self) -> Result<()> {
-        self.general.data_dir = normalize_path(self.general.data_dir.clone()).await?;
-        self.general.codex_home_global =
-            normalize_path(self.general.codex_home_global.clone()).await?;
-        self.general.system_codex_home =
-            normalize_path(self.general.system_codex_home.clone()).await?;
-        self.general.default_workspace_dir =
-            normalize_path(self.general.default_workspace_dir.clone()).await?;
-        self.general.self_repo_dir = normalize_path(self.general.self_repo_dir.clone()).await?;
-        self.general.self_binary_path = if self.general.self_binary_path.is_absolute() {
-            self.general.self_binary_path.clone()
-        } else {
-            normalize_path(
-                self.general
-                    .self_repo_dir
-                    .join(&self.general.self_binary_path),
-            )
-            .await?
-        };
+        self.general.data_dir = normalize_path(&self.general.data_dir)?;
+        self.general.codex_home_global = normalize_path(&self.general.codex_home_global)?;
+        self.general.system_codex_home = normalize_path(&self.general.system_codex_home)?;
+        self.general.default_workspace_dir = normalize_path(&self.general.default_workspace_dir)?;
         Ok(())
     }
 }
-
-async fn normalize_path(path: PathBuf) -> Result<PathBuf> {
-    let expanded = expand_tilde(path);
-    let absolute = if expanded.is_absolute() {
-        expanded
+fn normalize_path(p: &Path) -> Result<PathBuf> {
+    let text = p.to_string_lossy();
+    let p = if let Some(rest) = text.strip_prefix("~/") {
+        home_dir().join(rest)
     } else {
-        std::env::current_dir()?.join(expanded)
+        p.to_owned()
     };
-    tokio::fs::create_dir_all(absolute.parent().unwrap_or_else(|| Path::new(".")))
-        .await
-        .ok();
-    std::fs::canonicalize(&absolute).or(Ok(absolute))
-}
-
-fn expand_tilde(path: PathBuf) -> PathBuf {
-    let raw = path.to_string_lossy();
-    if raw == "~" {
-        return home_dir();
-    }
-    if let Some(rest) = raw.strip_prefix("~/") {
-        return home_dir().join(rest);
-    }
-    path
-}
-
-fn default_data_dir() -> PathBuf {
-    default_codex_claw_root().join("data")
-}
-
-fn default_global_codex_home() -> PathBuf {
-    default_codex_claw_root().join(".codex")
-}
-
-fn default_system_codex_home() -> PathBuf {
-    home_dir().join(".codex")
-}
-
-fn default_workspace_dir() -> PathBuf {
-    DataLayout::new(default_data_dir()).shared_workspace_dir()
-}
-
-fn default_codex_binary() -> String {
-    "codex".to_string()
-}
-
-fn default_model() -> String {
-    "gpt-5.4".to_string()
-}
-fn default_display_timezone() -> String {
-    "Asia/Shanghai".to_string()
-}
-
-fn default_self_repo_dir() -> PathBuf {
-    PathBuf::from(".")
-}
-
-fn default_self_build_command() -> String {
-    "cargo build --release".to_string()
-}
-
-fn default_self_binary_path() -> PathBuf {
-    PathBuf::from("./target/release/codex-claw")
-}
-
-fn default_api_base_url() -> String {
-    "https://sandbox.api.sgroup.qq.com".to_string()
-}
-
-fn default_token_url() -> String {
-    "https://bots.qq.com/app/getAppAccessToken".to_string()
-}
-
-fn default_codex_claw_root() -> PathBuf {
-    home_dir().join(".codex-claw")
+    let p = if p.is_absolute() {
+        p
+    } else {
+        std::env::current_dir()?.join(p)
+    };
+    std::fs::create_dir_all(&p)?;
+    Ok(std::fs::canonicalize(p)?)
 }

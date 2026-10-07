@@ -12,8 +12,8 @@ pub(crate) struct ParsedOutput {
     pub(crate) directives: Vec<Directive>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Directive {
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Directive {
     Image { path: PathBuf },
     File { path: PathBuf, name: Option<String> },
 }

@@ -93,11 +93,6 @@ struct AccessTokenResponse {
     expires_in: u64,
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
-struct MessageReference<'a> {
-    message_id: &'a str,
-}
-
 #[derive(Debug, Serialize)]
 struct SendTextBody<'a> {
     content: &'a str,
@@ -105,8 +100,6 @@ struct SendTextBody<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     msg_id: Option<&'a str>,
     msg_seq: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    message_reference: Option<MessageReference<'a>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -116,8 +109,6 @@ struct SendMarkdownBody<'a> {
     msg_id: Option<&'a str>,
     msg_seq: u32,
     markdown: MarkdownPayload<'a>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    message_reference: Option<MessageReference<'a>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -250,15 +241,22 @@ impl QqApiClient {
         })
     }
 
+    pub(crate) fn allows_user(&self, openid: &str) -> bool {
+        self.config.allowed_users.is_empty()
+            || self.config.allowed_users.iter().any(|user| user == openid)
+    }
+
+    pub(crate) fn has_user_allowlist(&self) -> bool {
+        !self.config.allowed_users.is_empty()
+    }
+
     pub(crate) async fn send_text(
         &self,
         openid: &str,
         message_id: &str,
         text: &str,
-        reference_message_id: Option<&str>,
     ) -> Result<()> {
-        self.send_text_inner(openid, Some(message_id), text, reference_message_id)
-            .await
+        self.send_text_inner(openid, Some(message_id), text).await
     }
 
     pub(crate) async fn send_markdown(
@@ -266,14 +264,12 @@ impl QqApiClient {
         openid: &str,
         message_id: &str,
         markdown: &str,
-        reference_message_id: Option<&str>,
     ) -> Result<()> {
-        self.send_text_inner(openid, Some(message_id), markdown, reference_message_id)
-            .await
+        self.send_text_inner(openid, Some(message_id), markdown).await
     }
 
     pub(crate) async fn send_markdown_proactive(&self, openid: &str, markdown: &str) -> Result<()> {
-        self.send_text_inner(openid, None, markdown, None).await
+        self.send_text_inner(openid, None, markdown).await
     }
 
     async fn send_text_inner(
@@ -281,25 +277,20 @@ impl QqApiClient {
         openid: &str,
         message_id: Option<&str>,
         text: &str,
-        reference_message_id: Option<&str>,
     ) -> Result<()> {
         info!(
             openid = %openid,
             reply_to = message_id.unwrap_or(""),
-            reference = reference_message_id.unwrap_or(""),
             text_len = text.len(),
             "sending qq text message"
         );
         for chunk in split_text(text, 4500) {
             let msg_seq = self.next_msg_seq(message_id.unwrap_or(openid)).await;
-            let message_reference =
-                reference_message_id.map(|value| MessageReference { message_id: value });
             let markdown_body = SendMarkdownBody {
                 msg_type: 2,
                 msg_id: message_id,
                 msg_seq,
                 markdown: MarkdownPayload { content: &chunk },
-                message_reference,
             };
             let url = self.user_endpoint(openid, "messages");
             match self
@@ -317,7 +308,6 @@ impl QqApiClient {
                         msg_type: 0,
                         msg_id: message_id,
                         msg_seq,
-                        message_reference,
                     };
                     let _: serde_json::Value = self.post_json(url, &text_body).await?;
                 }
@@ -390,35 +380,57 @@ impl QqApiClient {
         Ok(response.url)
     }
 
-    pub(crate) async fn download_attachment(
+    pub(crate) async fn download_attachment_limited(
         &self,
         source_url: &str,
         destination: &Path,
+        max_bytes: u64,
     ) -> Result<()> {
+        use tokio::io::AsyncWriteExt;
         let normalized_url = if source_url.starts_with("//") {
             format!("https:{source_url}")
         } else {
-            source_url.to_string()
+            source_url.to_owned()
         };
-        let response = self
+        let mut response = self
             .client
             .get(&normalized_url)
             .send()
-            .await
-            .with_context(|| format!("failed to download {normalized_url}"))?;
-        let status = response.status();
-        let bytes = response.bytes().await?;
-        anyhow::ensure!(status.is_success(), "download failed with status {status}");
+            .await?
+            .error_for_status()?;
+        anyhow::ensure!(
+            response.content_length().is_none_or(|n| n <= max_bytes),
+            "attachment exceeds size or quota limit"
+        );
         if let Some(parent) = destination.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        tokio::fs::write(destination, bytes).await?;
-        info!(
-            source_url = %normalized_url,
-            destination = %destination.display(),
-            "downloaded incoming attachment"
-        );
-        Ok(())
+        let part = destination.with_extension("download-part");
+        if part.exists() {
+            tokio::fs::remove_file(&part).await?;
+        }
+        let result = async {
+            let mut file = tokio::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&part)
+                .await?;
+            let mut total = 0u64;
+            while let Some(chunk) = response.chunk().await? {
+                total = total.saturating_add(chunk.len() as u64);
+                anyhow::ensure!(total <= max_bytes, "attachment exceeds size or quota limit");
+                file.write_all(&chunk).await?;
+            }
+            file.sync_all().await?;
+            drop(file);
+            tokio::fs::rename(&part, destination).await?;
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        if result.is_err() {
+            let _ = tokio::fs::remove_file(&part).await;
+        }
+        result
     }
 
     pub(crate) async fn get_access_token(&self) -> Result<String> {
@@ -1001,6 +1013,7 @@ fn split_long_line(line: &str, limit: usize) -> Vec<String> {
     pieces
 }
 
+#[cfg(test)]
 pub(crate) fn estimate_text_chunk_count(text: &str) -> usize {
     split_text(text, 4500).len()
 }
@@ -1082,6 +1095,19 @@ mod tests {
             "split_text dropped or reordered content"
         );
         assert_eq!(chunks.last().map(String::as_str), Some("short tail"));
+    }
+
+    #[test]
+    fn passive_message_can_reply_without_quote_reference() {
+        let body = SendTextBody {
+            content: "hello",
+            msg_type: 0,
+            msg_id: Some("m1"),
+            msg_seq: 1,
+        };
+        let value = serde_json::to_value(body).unwrap();
+        assert_eq!(value.get("msg_id").and_then(|v| v.as_str()), Some("m1"));
+        assert!(value.get("message_reference").is_none());
     }
 
     #[test]

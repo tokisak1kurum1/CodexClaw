@@ -37,6 +37,15 @@ pub struct AppServerHandle {
     pub(crate) supervisor: Arc<AppServerSupervisor>,
     pub(crate) approvals: Arc<ApprovalBroker>,
     runtime_configs: Arc<Mutex<HashMap<String, RuntimeConfigSignature>>>,
+    model_cache: Arc<
+        Mutex<
+            Option<(
+                std::time::Instant,
+                u64,
+                Vec<crate::codex::runtime::CodexModelEntry>,
+            )>,
+        >,
+    >,
 }
 
 impl AppServerHandle {
@@ -56,16 +65,29 @@ impl AppServerHandle {
             supervisor,
             approvals,
             runtime_configs: Arc::new(Mutex::new(HashMap::new())),
+            model_cache: Arc::new(Mutex::new(None)),
         })
     }
 
     pub async fn execute(
         &self,
-        request: ExecutionRequest,
+        mut request: ExecutionRequest,
         policy: TurnPolicy,
         cancel_rx: Option<oneshot::Receiver<()>>,
         update_tx: Option<mpsc::UnboundedSender<ExecutionUpdate>>,
     ) -> Result<ExecutionResult> {
+        if policy.plan_mode && request.model.is_none() {
+            let models = self.models().await?;
+            request.model = Some(
+                models
+                    .iter()
+                    .find(|m| m.is_default)
+                    .or_else(|| models.first())
+                    .ok_or_else(|| anyhow::anyhow!("No available model for plan mode"))?
+                    .name
+                    .clone(),
+            );
+        }
         AppServerSession::new(self.supervisor.clone(), self.runtime_configs.clone())
             .execute(request, policy, cancel_rx, update_tx)
             .await
@@ -81,6 +103,77 @@ impl AppServerHandle {
             .await
     }
 
+    pub async fn steer(
+        &self,
+        thread: &str,
+        turn: &str,
+        message: &str,
+        text: &str,
+    ) -> Result<String> {
+        let client = self.supervisor.client().await?;
+        let params = protocol::TurnSteerParams {
+            thread_id: thread.into(),
+            expected_turn_id: turn.into(),
+            client_user_message_id: Some(message.into()),
+            input: vec![protocol::TurnInputItem::Text { text: text.into() }],
+        };
+        let response: protocol::TurnSteerResponse = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            client.request("turn/steer", &params),
+        )
+        .await??;
+        Ok(response.turn_id)
+    }
+    pub(crate) async fn models(&self) -> Result<Vec<crate::codex::runtime::CodexModelEntry>> {
+        let client = self.supervisor.client().await?;
+        let connection = client.connection_id;
+        let mut cache = self.model_cache.lock().await;
+        if let Some((at, cached_connection, models)) = cache.as_ref() {
+            if *cached_connection == connection
+                && at.elapsed() < std::time::Duration::from_secs(300)
+            {
+                return Ok(models.clone());
+            }
+        }
+        let mut models = Vec::new();
+        let mut cursor = serde_json::Value::Null;
+        let mut pages = 0;
+        loop {
+            pages += 1;
+            anyhow::ensure!(pages <= 16, "model/list pagination exceeded limit");
+            let v: serde_json::Value = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                client.request(
+                    "model/list",
+                    &serde_json::json!({"cursor":cursor,"limit":100}),
+                ),
+            )
+            .await??;
+            let data = v["data"]
+                .as_array()
+                .ok_or_else(|| anyhow::anyhow!("model/list omitted data"))?;
+            for m in data {
+                let name = m["model"]
+                    .as_str()
+                    .or_else(|| m["id"].as_str())
+                    .ok_or_else(|| anyhow::anyhow!("model identifier missing"))?;
+                models.push(crate::codex::runtime::CodexModelEntry {
+                    name: name.into(),
+                    is_default: m["isDefault"].as_bool().unwrap_or(false),
+                    aliases: Vec::new(),
+                    description: m["description"].as_str().map(str::to_owned),
+                    description_zh: None,
+                    description_en: None,
+                });
+            }
+            cursor = v["nextCursor"].clone();
+            if cursor.is_null() {
+                break;
+            }
+        }
+        *cache = Some((std::time::Instant::now(), connection, models.clone()));
+        Ok(models)
+    }
     pub async fn shutdown(&self) {
         self.supervisor.shutdown().await;
     }

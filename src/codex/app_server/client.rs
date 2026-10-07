@@ -1,4 +1,4 @@
-//! Typed JSON-RPC client wrapping [`StdioTransport`].
+//! Typed JSON-RPC client over the daemon WebSocket transport.
 //!
 //! Responsibilities:
 //! - correlate outbound requests with incoming responses via an auto-
@@ -51,37 +51,42 @@ pub(crate) struct Notification {
 
 #[derive(Debug)]
 pub(crate) struct ServerRequest {
+    pub(crate) connection_id: u64,
     pub(crate) id: JsonValue,
     pub(crate) method: String,
     pub(crate) params: JsonValue,
 }
 
 pub(crate) struct JsonRpcClient {
+    pub(crate) connection_id: u64,
+    disconnected: tokio::sync::watch::Sender<bool>,
     transport: Arc<StdioTransport>,
     pending: PendingMap,
     next_id: AtomicI64,
     reader_handle: Mutex<Option<JoinHandle<()>>>,
-    stderr_handle: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl JsonRpcClient {
     /// Construct a client and start its reader. Returns the client plus a
-    /// receiver that fires when the reader task exits (child EOF).
+    /// receiver that fires when the daemon WebSocket reader exits.
     pub(crate) async fn start(
         transport: Arc<StdioTransport>,
         notifications_tx: broadcast::Sender<Notification>,
         server_requests_tx: mpsc::Sender<ServerRequest>,
     ) -> Result<(Arc<Self>, oneshot::Receiver<()>)> {
         let reader = transport
-            .take_stdout()
+            .take_reader()
             .await
-            .context("transport stdout already taken")?;
-        let stderr = transport.take_stderr().await;
+            .context("transport reader already taken")?;
 
+        static CONNECTIONS: AtomicI64 = AtomicI64::new(1);
+        let connection_id = CONNECTIONS.fetch_add(1, Ordering::Relaxed) as u64;
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
         let pending_for_reader = pending.clone();
         let notifications_for_reader = notifications_tx;
 
+        let (disconnected, _) = tokio::sync::watch::channel(false);
+        let disconnect_reader = disconnected.clone();
         let (exit_tx, exit_rx) = oneshot::channel();
         let raw_handle = tokio::spawn({
             let pending = pending_for_reader;
@@ -116,27 +121,46 @@ impl JsonRpcClient {
                     Message::Request { id, method, params } => {
                         let tx = server_requests.clone();
                         tokio::spawn(async move {
-                            if let Err(err) = tx.send(ServerRequest { id, method, params }).await {
+                            if let Err(err) = tx
+                                .send(ServerRequest {
+                                    connection_id,
+                                    id,
+                                    method,
+                                    params,
+                                })
+                                .await
+                            {
                                 warn!(error = %err, "server request channel closed");
                             }
                         });
                     }
                 });
                 let _ = inner.await;
+                let _ = disconnect_reader.send_replace(true);
                 let _ = exit_tx.send(());
             }
         });
 
-        let stderr_handle = stderr.map(transport::spawn_stderr_logger);
-
         let client = Arc::new(Self {
+            connection_id,
+            disconnected,
             transport,
             pending,
             next_id: AtomicI64::new(1),
             reader_handle: Mutex::new(Some(raw_handle)),
-            stderr_handle: Mutex::new(stderr_handle),
         });
         Ok((client, exit_rx))
+    }
+
+    pub(crate) async fn next_notification(
+        &self,
+        notifications: &mut broadcast::Receiver<Notification>,
+    ) -> Result<Notification, broadcast::error::RecvError> {
+        let mut disconnected = self.disconnected.subscribe();
+        if *disconnected.borrow() {
+            return Err(broadcast::error::RecvError::Closed);
+        }
+        tokio::select! {_=disconnected.changed()=>Err(broadcast::error::RecvError::Closed),result=notifications.recv()=>result}
     }
 
     pub(crate) async fn request<P, R>(&self, method: &str, params: &P) -> Result<R>
@@ -157,9 +181,14 @@ impl JsonRpcClient {
             self.pending.lock().await.remove(&id);
             return Err(err);
         }
-        let outcome = rx
-            .await
-            .map_err(|_| anyhow!("app-server transport dropped before response to {method}"))?;
+        let outcome = match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
+            Ok(response) => response
+                .map_err(|_| anyhow!("app-server transport dropped before response to {method}"))?,
+            Err(_) => {
+                self.pending.lock().await.remove(&id);
+                anyhow::bail!("app-server request {method} timed out")
+            }
+        };
         match outcome {
             Ok(value) => serde_json::from_value(value)
                 .with_context(|| format!("deserialize response for {method}")),
@@ -203,17 +232,11 @@ impl JsonRpcClient {
     }
 
     pub(crate) async fn shutdown(&self, reason: &str) {
+        self.disconnected.send_replace(true);
         debug!(reason, "shutting down JsonRpcClient");
         self.drain_pending_with_disconnect(reason).await;
         if let Some(handle) = self.reader_handle.lock().await.take() {
             handle.abort();
-        }
-        if let Some(handle) = self.stderr_handle.lock().await.take() {
-            handle.abort();
-        }
-        if let Some(mut child) = self.transport.take_child().await {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
         }
     }
 }

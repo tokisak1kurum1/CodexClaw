@@ -138,9 +138,10 @@ mod tests {
             tokio::fs::read_to_string(codex_home.path().join("skills/claw-cron/SKILL.md"))
                 .await
                 .unwrap();
-        assert!(cron_skill.contains("--action reminder"));
-        assert!(cron_skill.contains("Do not use `codex-exec` or `codex-turn`"));
-        assert!(cron_skill.contains("Use `codex-exec` when"));
-        assert!(cron_skill.contains("Use `codex-turn` when"));
+        assert!(cron_skill.contains("schedule_create"));
+        assert!(cron_skill.contains("schedule_manage"));
+        assert!(cron_skill.contains("Missed occurrences beyond the grace window are skipped"));
+        assert!(!cron_skill.contains("codex-exec"));
+        assert!(!cron_skill.contains("codex-turn"));
     }
 }

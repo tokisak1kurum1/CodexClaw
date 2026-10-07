@@ -1,3 +1,18 @@
+# Daemon prerequisite / 官方 daemon 前置步骤
+
+安装配置中固定的 Codex 0.159.2，在与机器人相同的 CODEX_HOME 中准备订阅认证，并由运维运行：
+
+```bash
+export CODEX_HOME="$HOME/.codex-claw/.codex"
+mkdir -p "$CODEX_HOME/app-server-daemon"
+printf '%s\n' '{"remoteControlEnabled":false,"shutdownGraceSeconds":60,"updater":{"autoUpdateEnabled":false,"updateIntervalMinutes":120}}' > "$CODEX_HOME/app-server-daemon/settings.json"
+codex app-server daemon update --from-cli -y
+codex app-server daemon start
+codex app-server daemon version
+```
+
+机器人只连接 daemon socket，不执行这些启动或更新操作。启动时同时检查 CLI 和 daemon 的版本。构建使用 `CARGO_INCREMENTAL=0 cargo build --release --locked`。
+
 # 快速入门
 
 CodexClaw 的安装、配置与首次运行指南。
@@ -7,7 +22,7 @@ CodexClaw 的安装、配置与首次运行指南。
 ## 前置条件
 
 - Rust 工具链 (edition 2024)
-- OpenAI Codex CLI 已安装并完成登录认证，确认 `codex exec --json "reply with exactly: ok"` 可正常运行
+- OpenAI Codex CLI 已安装并完成登录认证，CLI 与 daemon 版本须匹配配置的 pin
 - 系统 `~/.codex` 目录已存在，至少包含 `config.toml` 与 `auth.json`
 - QQ 开放平台账号（需完成个人认证）
 
@@ -70,7 +85,7 @@ CODEX_CLAW_CONFIG=~/.codex-claw/codexclaw.toml ./target/release/codex-claw
 **日志排查要点：**
 - 如果出现 access token 获取失败 → 检查 `app_id` 和 `app_secret` 是否正确
 - 如果 Gateway 连接失败 → 检查网络连接和 `api_base_url`
-- 如果 Codex 启动失败 → 确认 `codex exec --json` 可正常运行
+- 如果 Codex 启动失败 → 检查配置的 CLI/daemon 版本和同一 CODEX_HOME 下的 daemon 状态
 
 首次启动会自动从系统 `~/.codex` 复制 `config.toml`、`auth.json`、`skills/` 到 `~/.codex-claw/.codex/`（已存在文件不覆盖）。
 
@@ -143,7 +158,6 @@ systemctl --user daemon-reload
 systemctl --user enable --now codexclaw
 ```
 
-> **提示：** 由于 `/self-update` 命令会替换运行中的二进制并退出当前进程，建议交给外部服务管理器负责自动重新拉起。
 
 ## 沙盒模式
 
@@ -164,5 +178,4 @@ cargo build --release
 # 重启服务
 ```
 
-**QQ 内更新：** 发送 `/self-update` 或 `/自更新`，CodexClaw 会自动拉取最新代码、编译并替换运行中的二进制。
 

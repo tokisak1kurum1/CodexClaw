@@ -1,9 +1,9 @@
-//! Process lifecycle for a long-lived `codex app-server` child.
+//! Connection lifecycle for the official shared app-server daemon.
 //!
 //! Ensures:
-//! - exactly one running child at a time (file lock on the data dir);
-//! - automatic respawn with exponential backoff on crash;
-//! - `initialize` handshake rerun after each spawn;
+//! - one direct WebSocket-over-UDS connection to the daemon;
+//! - automatic reconnect with exponential backoff;
+//! - `initialize` handshake rerun after each reconnect;
 //! - atomic client swap so callers always see a live connection.
 
 use std::{ffi::OsString, path::PathBuf, sync::Arc, time::Duration};
@@ -26,6 +26,7 @@ const BACKOFF_MIN: Duration = Duration::from_millis(250);
 const BACKOFF_MAX: Duration = Duration::from_secs(5);
 
 pub(crate) struct AppServerSupervisor {
+    pub(crate) thread_owners: Mutex<std::collections::HashMap<String, String>>,
     codex_binary: PathBuf,
     codex_home: PathBuf,
     sqlite_home: PathBuf,
@@ -49,6 +50,7 @@ impl AppServerSupervisor {
         let (notifications_tx, _) = broadcast::channel(CHANNEL_CAP);
         let (server_requests_tx, server_requests_rx) = mpsc::channel(64);
         Arc::new(Self {
+            thread_owners: Mutex::new(std::collections::HashMap::new()),
             codex_binary,
             codex_home,
             sqlite_home,
@@ -62,8 +64,8 @@ impl AppServerSupervisor {
         })
     }
 
-    /// Launch the supervisor loop. Spawns the child, performs `initialize`,
-    /// and kicks off a background task that respawns on EOF.
+    /// Launch the supervisor loop. Connects to the daemon, performs
+    /// `initialize`, and starts a background reconnect loop.
     pub(crate) async fn start(self: &Arc<Self>) -> Result<()> {
         let (client, exit_rx) = self.spawn_and_initialize().await?;
         *self.client.write().await = Some(client);
@@ -93,32 +95,24 @@ impl AppServerSupervisor {
                     return;
                 }
                 _ = &mut exit_rx => {
-                    warn!("app-server stdout closed; respawning");
-                    // Notify in-flight turns immediately. The broadcast Sender is
-                    // program-lifetime, so receivers never observe Closed on a
-                    // child crash; without this synthetic signal each turn would
-                    // stall for the full output-idle timeout before failing.
-                    let _ = self.notifications_tx.send(Notification {
-                        method: method::BACKEND_DISCONNECTED.to_string(),
-                        params: serde_json::Value::Null,
-                    });
+                    warn!("app-server websocket closed; reconnecting");
                     if let Some(client) = self.client.write().await.take() {
                         client.drain_pending_with_disconnect("app-server exited").await;
-                        // Kill child if still around.
                         client.shutdown("respawn").await;
                     }
                     loop {
-                        sleep(backoff).await;
-                        match self.spawn_and_initialize().await {
+                        tokio::select!{_= &mut shutdown_rx=>return,_=sleep(backoff)=>{}}
+                        let spawned=tokio::select!{_= &mut shutdown_rx=>return,result=self.spawn_and_initialize()=>result};
+                        match spawned {
                             Ok((client, new_exit_rx)) => {
                                 *self.client.write().await = Some(client);
                                 exit_rx = new_exit_rx;
                                 backoff = BACKOFF_MIN;
-                                info!("app-server respawned");
+                                info!("app-server reconnected");
                                 break;
                             }
                             Err(err) => {
-                                error!(error = %err, "failed to respawn app-server");
+                                error!(error = %err, "failed to reconnect app-server");
                                 backoff = (backoff * 2).min(BACKOFF_MAX);
                             }
                         }
@@ -131,13 +125,14 @@ impl AppServerSupervisor {
     async fn spawn_and_initialize(
         self: &Arc<Self>,
     ) -> Result<(Arc<JsonRpcClient>, oneshot::Receiver<()>)> {
-        let transport = StdioTransport::spawn(
+        let transport = StdioTransport::connect(
             &self.codex_binary,
             &self.codex_home,
             &self.sqlite_home,
             self.path_env.as_deref(),
         )
-        .context("spawn app-server")?;
+        .await
+        .context("connect app-server daemon")?;
         let transport = Arc::new(transport);
         let (client, exit_rx) = JsonRpcClient::start(
             transport,
@@ -153,10 +148,13 @@ impl AppServerSupervisor {
                 experimental_api: Some(true),
             }),
         };
-        let resp: InitializeResponse = client
-            .request("initialize", &params)
-            .await
-            .context("initialize handshake")?;
+        let resp: InitializeResponse = match client.request("initialize", &params).await {
+            Ok(resp) => resp,
+            Err(err) => {
+                client.shutdown("initialize failed").await;
+                return Err(err).context("initialize handshake");
+            }
+        };
         if let Some(home) = resp.codex_home.as_deref() {
             let expected = self.codex_home.to_string_lossy();
             if home != expected {
@@ -167,10 +165,10 @@ impl AppServerSupervisor {
                 );
             }
         }
-        client
-            .notify_empty(method::INITIALIZED)
-            .await
-            .context("initialized notification")?;
+        if let Err(err) = client.notify_empty(method::INITIALIZED).await {
+            client.shutdown("initialized notification failed").await;
+            return Err(err).context("initialized notification");
+        }
         Ok((client, exit_rx))
     }
 

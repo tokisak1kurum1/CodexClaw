@@ -31,6 +31,7 @@ pub(crate) struct TurnState {
     pub(crate) thread_id: Option<String>,
     pub(crate) turn_id: Option<String>,
     pub(crate) agent_text_parts: Vec<String>,
+    pub(crate) completed_agent_items: std::collections::HashSet<String>,
     pub(crate) changed_files: Vec<std::path::PathBuf>,
     pub(crate) token_usage: Option<TokenUsagePayload>,
     pub(crate) last_plan_signature: Option<String>,
@@ -88,6 +89,12 @@ pub(crate) fn translate_item_completed(
         if let Some(text) = item.text.clone()
             && !text.is_empty()
         {
+            if let Some(id) = notif.item.id.as_deref()
+                && !state.completed_agent_items.insert(id.to_owned())
+            {
+                trace!(item_id = %id, "duplicate agent item/completed ignored");
+                return Vec::new();
+            }
             state.agent_text_parts.push(text.clone());
             return vec![ExecutionUpdate::AgentMessage { text }];
         }
@@ -432,6 +439,17 @@ mod tests {
             ExecutionUpdate::AgentMessage { text } => assert_eq!(text, "Hello world"),
             _ => panic!("expected AgentMessage"),
         }
+        assert_eq!(state.agent_text_parts, vec!["Hello world"]);
+    }
+
+    #[test]
+    fn duplicate_agent_message_completion_is_idempotent_by_item_id() {
+        let item = make_item(json!({
+            "id":"m","type":"agentMessage","text":"Hello world","phase":"final"
+        }));
+        let mut state = TurnState::default();
+        assert_eq!(translate_item_completed(&mut state, &item).len(), 1);
+        assert!(translate_item_completed(&mut state, &item).is_empty());
         assert_eq!(state.agent_text_parts, vec!["Hello world"]);
     }
 

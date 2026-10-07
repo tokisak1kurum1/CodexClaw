@@ -105,10 +105,10 @@ impl RuntimeConfigSignature {
 
 /// How the turn should classify sandbox/approval for Codex.
 ///
-/// For both fields, `None` means "defer to the server's config.toml default"
-/// (e.g. `sandbox_mode`, `approval_policy`, and the `sandbox_workspace_write.*`
-/// knobs in `~/.codex-claw/.codex/config.toml`). `Some(...)` explicitly
-/// overrides the config for that turn.
+/// Approval policy may inherit from config, but filesystem access does not: QQ
+/// threads are forced to workspace-write at thread start/resume so shared bot
+/// identity/config files outside the per-user runtime roots cannot be modified.
+/// Plan mode tightens this further to read-only.
 #[derive(Debug, Clone, Default)]
 pub struct TurnPolicy {
     pub(crate) approval_policy: Option<ApprovalPolicy>,
@@ -190,6 +190,14 @@ impl AppServerSession {
             .await
             .context("establish thread")?;
 
+        if let Some(owner) = &request.owner_user_id {
+            let mut owners = self.supervisor.thread_owners.lock().await;
+            anyhow::ensure!(
+                owners.get(&thread_id).is_none_or(|u| u == owner),
+                "thread belongs to another user"
+            );
+            owners.insert(thread_id.clone(), owner.clone());
+        }
         // Announce the thread id up front so the caller can persist it for
         // resume even if this turn is later interrupted (/stop) or fails
         // mid-flight — those paths return Err and would otherwise drop it.
@@ -238,11 +246,26 @@ impl AppServerSession {
             "sending turn/start"
         );
 
-        let turn_resp: TurnStartResponse = client
+        let turn_resp: Result<TurnStartResponse> = client
             .request("turn/start", &turn_params)
             .await
-            .context("turn/start")?;
+            .context("turn/start");
+        let turn_resp = match turn_resp {
+            Ok(response) => response,
+            Err(error) => {
+                if request.ephemeral {
+                    self.release_ephemeral(&client, &thread_id).await;
+                }
+                return Err(error);
+            }
+        };
         let turn_id = turn_resp.turn.id.clone();
+        if let Some(tx) = update_tx.as_ref() {
+            let _ = tx.send(ExecutionUpdate::TurnStarted {
+                thread_id: thread_id.clone(),
+                turn_id: turn_id.clone(),
+            });
+        }
         debug!(thread_id = %thread_id, turn_id = %turn_id, "turn started");
 
         let mut runner = TurnRunner {
@@ -255,7 +278,11 @@ impl AppServerSession {
             cancel_rx,
             cancel_requested: false,
         };
-        let outcome = runner.drive().await?;
+        let outcome = runner.drive().await;
+        if request.ephemeral {
+            self.release_ephemeral(&client, &thread_id).await;
+        }
+        let outcome = outcome?;
 
         let token_usage_info = runner.build_token_usage_info();
         let text = runner
@@ -278,6 +305,21 @@ impl AppServerSession {
             TurnOutcome::Interrupted => Err(anyhow!("codex turn aborted by user")),
             TurnOutcome::Failed(msg) => Err(anyhow!("codex turn failed: {msg}")),
         }
+    }
+
+    async fn release_ephemeral(&self, client: &Arc<JsonRpcClient>, thread_id: &str) {
+        self.runtime_configs.lock().await.remove(thread_id);
+        self.supervisor.thread_owners.lock().await.remove(thread_id);
+        let _ = timeout(
+            Duration::from_secs(5),
+            client.request::<_, ThreadUnsubscribeResponse>(
+                "thread/unsubscribe",
+                &ThreadUnsubscribeParams {
+                    thread_id: thread_id.to_owned(),
+                },
+            ),
+        )
+        .await;
     }
 
     pub(crate) async fn compact_thread(
@@ -307,7 +349,7 @@ impl AppServerSession {
                 .request::<_, ThreadCompactStartResponse>(method::THREAD_COMPACT_START, &params)
                 .await
                 .context("thread/compact/start")?;
-            match wait_for_compaction(&thread_id, notifications, &mut cancel_rx).await {
+            match wait_for_compaction(&client, &thread_id, notifications, &mut cancel_rx).await {
                 Ok(()) => return Ok(()),
                 Err(err) if attempt < COMPACT_MAX_ATTEMPTS && is_retryable_compact_error(&err) => {
                     warn!(
@@ -426,6 +468,13 @@ impl AppServerSession {
             }
         }
         let start = ThreadStartParams {
+            developer_instructions: request.developer_instructions.clone(),
+            ephemeral: Some(request.ephemeral),
+            dynamic_tools: if request.ephemeral {
+                None
+            } else {
+                Some(crate::memory::tools::specs())
+            },
             model: request.model.clone(),
             cwd: Some(request.workspace_dir.to_string_lossy().into_owned()),
             approval_policy: policy.approval_policy,
@@ -578,11 +627,14 @@ fn build_runtime_workspace_roots(add_dirs: &[PathBuf]) -> Option<Vec<String>> {
     Some(roots)
 }
 
-fn thread_sandbox(policy: &TurnPolicy, add_dirs: &[PathBuf]) -> Option<SandboxMode> {
-    if !add_dirs.is_empty() {
-        return None;
-    }
-    policy.sandbox_policy.as_ref().map(sandbox_policy_to_mode)
+fn thread_sandbox(policy: &TurnPolicy, _add_dirs: &[PathBuf]) -> Option<SandboxMode> {
+    Some(
+        policy
+            .sandbox_policy
+            .as_ref()
+            .map(sandbox_policy_to_mode)
+            .unwrap_or(SandboxMode::WorkspaceWrite),
+    )
 }
 
 fn sandbox_policy_to_mode(policy: &SandboxPolicy) -> SandboxMode {
@@ -749,10 +801,14 @@ impl TurnRunner {
             // app-server activity signals the backend is still alive. A turn
             // whose terminal event is lost to a broadcast lag is instead
             // rescued by the child-exit fast-fail / interrupt paths.
-            match timeout(OUTPUT_IDLE_TIMEOUT, self.notifications.recv()).await {
+            match timeout(
+                OUTPUT_IDLE_TIMEOUT,
+                self.client.next_notification(&mut self.notifications),
+            )
+            .await
+            {
                 // Supervisor-synthesized disconnect: the child exited, so fail
                 // fast (fast-restart path) instead of waiting out the timeout.
-                Ok(Ok(n)) if n.method == method::BACKEND_DISCONNECTED => return Ok(None),
                 Ok(Ok(n)) if is_for_turn(&n, &self.thread_id, &self.turn_id) => {
                     return Ok(Some(n));
                 }
@@ -862,7 +918,12 @@ impl TurnRunner {
                 Some(d) => d,
                 None => return TurnOutcome::Interrupted,
             };
-            match timeout(remaining, self.notifications.recv()).await {
+            match timeout(
+                remaining,
+                self.client.next_notification(&mut self.notifications),
+            )
+            .await
+            {
                 Ok(Ok(n))
                     if is_for_turn(&n, &self.thread_id, &self.turn_id)
                         && (n.method == method::TURN_COMPLETED
@@ -921,6 +982,7 @@ impl TurnRunner {
 }
 
 async fn wait_for_compaction(
+    client: &Arc<JsonRpcClient>,
     thread_id: &str,
     mut notifications: broadcast::Receiver<Notification>,
     cancel_rx: &mut Option<oneshot::Receiver<()>>,
@@ -929,7 +991,7 @@ async fn wait_for_compaction(
         let next = async {
             timeout(
                 OUTPUT_IDLE_TIMEOUT,
-                next_compaction_notification(&mut notifications),
+                next_compaction_notification(client, &mut notifications),
             )
             .await
             .context(format!(
@@ -1001,16 +1063,11 @@ fn is_compaction_completed(thread_id: &str, notification: &Notification) -> bool
 }
 
 async fn next_compaction_notification(
+    client: &Arc<JsonRpcClient>,
     notifications: &mut broadcast::Receiver<Notification>,
 ) -> Result<Notification> {
     loop {
-        match notifications.recv().await {
-            // Child exited mid-compact: fail fast instead of waiting out the
-            // idle timeout (the Sender is program-lifetime, so Closed never
-            // fires on a child crash).
-            Ok(n) if n.method == method::BACKEND_DISCONNECTED => {
-                anyhow::bail!("app-server exited during compact");
-            }
+        match client.next_notification(notifications).await {
             Ok(n) => return Ok(n),
             Err(broadcast::error::RecvError::Lagged(n)) => {
                 warn!(lagged = n, "app-server notification stream lagged");
@@ -1030,14 +1087,13 @@ fn is_for_turn(notification: &Notification, thread_id: &str, turn_id: &str) -> b
         .map(|v| v == thread_id)
         .unwrap_or(false);
     if !matches_thread {
-        // Global-ish notifications (configWarning, account/*) have no
-        // threadId; allow them so errors can still abort the turn.
-        if params.get("threadId").is_none() {
-            return true;
-        }
         return false;
     }
-    match params.get("turnId").and_then(|v| v.as_str()) {
+    match params
+        .get("turnId")
+        .or_else(|| params.get("turn").and_then(|t| t.get("id")))
+        .and_then(|v| v.as_str())
+    {
         Some(v) => v == turn_id,
         None => true,
     }
@@ -1072,6 +1128,9 @@ mod tests {
             context_mode: None,
             reasoning_effort: crate::model::settings::ReasoningEffort::High,
             image_paths: Vec::new(),
+            developer_instructions: None,
+            ephemeral: false,
+            owner_user_id: None,
         }
     }
 
@@ -1101,12 +1160,12 @@ mod tests {
     }
 
     #[test]
-    fn is_for_turn_allows_unscoped() {
+    fn is_for_turn_rejects_unscoped() {
         let n = Notification {
             method: "configWarning".into(),
             params: serde_json::json!({"message":"hi"}),
         };
-        assert!(is_for_turn(&n, "t", "u"));
+        assert!(!is_for_turn(&n, "t", "u"));
     }
 
     #[test]
@@ -1182,13 +1241,15 @@ mod tests {
     }
 
     #[test]
-    fn add_dirs_runtime_roots_take_precedence_over_thread_sandbox() {
-        let policy = TurnPolicy::plan_mode();
-
-        assert!(thread_sandbox(&policy, &[std::path::PathBuf::from("/tmp/inbox")]).is_none());
+    fn runtime_roots_do_not_disable_explicit_thread_sandbox() {
+        let plan = TurnPolicy::plan_mode();
         assert!(matches!(
-            thread_sandbox(&policy, &[]),
+            thread_sandbox(&plan, &[std::path::PathBuf::from("/tmp/inbox")]),
             Some(SandboxMode::ReadOnly)
+        ));
+        assert!(matches!(
+            thread_sandbox(&TurnPolicy::inherit_from_config(), &[std::path::PathBuf::from("/tmp/inbox")]),
+            Some(SandboxMode::WorkspaceWrite)
         ));
     }
 

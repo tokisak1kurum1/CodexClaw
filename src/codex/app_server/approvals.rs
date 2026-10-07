@@ -48,6 +48,8 @@ impl ApprovalOutcome {
 
 #[derive(Debug, Clone)]
 pub(crate) struct CommandApprovalEvent {
+    pub(crate) thread_id: String,
+    pub(crate) turn_id: Option<String>,
     pub(crate) command: Option<String>,
     pub(crate) cwd: Option<String>,
     pub(crate) reason: Option<String>,
@@ -55,6 +57,8 @@ pub(crate) struct CommandApprovalEvent {
 
 #[derive(Debug, Clone)]
 pub(crate) struct FileChangeApprovalEvent {
+    pub(crate) thread_id: String,
+    pub(crate) turn_id: Option<String>,
     pub(crate) reason: Option<String>,
     pub(crate) grant_root: Option<String>,
     pub(crate) file_changes: JsonValue,
@@ -62,6 +66,8 @@ pub(crate) struct FileChangeApprovalEvent {
 
 #[derive(Debug, Clone)]
 pub(crate) struct PermissionsApprovalEvent {
+    pub(crate) thread_id: String,
+    pub(crate) turn_id: Option<String>,
     pub(crate) reason: Option<String>,
     pub(crate) permissions: JsonValue,
 }
@@ -69,6 +75,7 @@ pub(crate) struct PermissionsApprovalEvent {
 #[derive(Debug, Clone)]
 pub(crate) struct ElicitationEvent {
     pub(crate) thread_id: String,
+    pub(crate) turn_id: Option<String>,
     pub(crate) server: Option<String>,
 }
 
@@ -76,6 +83,13 @@ pub(crate) struct ElicitationEvent {
 /// the oneshot to report its decision. If the handler drops the envelope
 /// without responding, the broker replies `Decline` so the turn can progress.
 pub(crate) enum ApprovalRequest {
+    Tool {
+        thread_id: String,
+        turn_id: String,
+        tool: String,
+        arguments: JsonValue,
+        reply: oneshot::Sender<JsonValue>,
+    },
     Command {
         event: CommandApprovalEvent,
         reply: oneshot::Sender<ApprovalOutcome>,
@@ -144,7 +158,42 @@ impl ApprovalBroker {
                 return;
             }
         };
+        if client.connection_id != req.connection_id {
+            debug!("discarding request from previous daemon connection");
+            return;
+        }
         match req.method.as_str() {
+            "item/tool/call" => {
+                let thread_id = req.params["threadId"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned();
+                let turn_id = req.params["turnId"].as_str().unwrap_or_default().to_owned();
+                let tool = req.params["tool"].as_str().unwrap_or_default().to_owned();
+                let arguments = req.params["arguments"].clone();
+                let (reply, rx) = oneshot::channel();
+                if let Some(tx) = self.handler_tx.lock().await.clone() {
+                    let _ = tx
+                        .send(ApprovalRequest::Tool {
+                            thread_id,
+                            turn_id,
+                            tool,
+                            arguments,
+                            reply,
+                        })
+                        .await;
+                    let result = tokio::time::timeout(std::time::Duration::from_secs(30), rx).await.ok().and_then(Result::ok).unwrap_or_else(||serde_json::json!({"success":false,"contentItems":[{"type":"inputText","text":"tool handler unavailable"}]}));
+                    let _ = client.respond_ok(req.id, &result).await;
+                } else {
+                    let _ = client
+                        .respond_ok(
+                            req.id,
+                            &serde_json::json!({"success":false,"contentItems":[]}),
+                        )
+                        .await;
+                }
+            }
+
             method::COMMAND_EXECUTION_REQUEST_APPROVAL | method::EXEC_COMMAND_APPROVAL => {
                 self.dispatch_command(&client, req).await;
             }
@@ -194,6 +243,8 @@ impl ApprovalBroker {
             "command approval requested"
         );
         let event = CommandApprovalEvent {
+            thread_id: params.thread_id,
+            turn_id: params.turn_id,
             command: params.command,
             cwd: params.cwd,
             reason: params.reason,
@@ -213,6 +264,8 @@ impl ApprovalBroker {
             return;
         };
         let event = FileChangeApprovalEvent {
+            thread_id: params.thread_id,
+            turn_id: params.turn_id,
             reason: params.reason,
             grant_root: params.grant_root,
             file_changes: params.file_changes,
@@ -234,15 +287,35 @@ impl ApprovalBroker {
         else {
             return;
         };
+        let requested = params.permissions.clone();
         let event = PermissionsApprovalEvent {
+            thread_id: params.thread_id,
+            turn_id: params.turn_id,
             reason: params.reason,
             permissions: params.permissions,
         };
-        self.respond_with_outcome(client, req.id, |tx| ApprovalRequest::Permissions {
-            event,
-            reply: tx,
-        })
-        .await;
+        let outcome = self
+            .ask_outcome(|tx| ApprovalRequest::Permissions { event, reply: tx })
+            .await;
+        let permissions = if matches!(
+            outcome,
+            ApprovalOutcome::Accept | ApprovalOutcome::AcceptForSession
+        ) {
+            requested
+        } else {
+            serde_json::json!({})
+        };
+        let scope = if matches!(outcome, ApprovalOutcome::AcceptForSession) {
+            "session"
+        } else {
+            "turn"
+        };
+        let _ = client
+            .respond_ok(
+                req.id,
+                &serde_json::json!({"permissions":permissions,"scope":scope}),
+            )
+            .await;
     }
 
     async fn dispatch_elicitation(&self, client: &Arc<JsonRpcClient>, req: ServerRequest) {
@@ -253,6 +326,7 @@ impl ApprovalBroker {
         };
         let event = ElicitationEvent {
             thread_id: params.thread_id,
+            turn_id: params.turn_id,
             server: params.server,
         };
         let (tx, rx) = oneshot::channel();

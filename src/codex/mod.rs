@@ -1,13 +1,11 @@
 pub mod app_server;
 pub mod config_snapshot;
 pub(crate) mod display;
-pub(crate) mod events;
-pub(crate) mod exec_cli;
-pub(crate) mod exec_output;
 pub(crate) mod executor;
 pub(crate) mod prompt;
 pub(crate) mod runtime;
 pub(crate) mod types;
+pub mod version;
 
 // Façade: the symbols the rest of the crate reaches for, re-exported so callers
 // import `crate::codex::X` instead of spelling out the submodule layout.
@@ -24,13 +22,7 @@ pub(crate) use app_server::{
     ApprovalOutcome, ApprovalRequest, CommandApprovalEvent, FileChangeApprovalEvent,
     PermissionsApprovalEvent,
 };
-pub(crate) use events::CodexEvent;
-pub(crate) use exec_output::agent_messages_from_lines;
+
 pub(crate) use prompt::build_prompt;
-pub(crate) use runtime::{
-    CodexModelEntry, CodexRuntimeProfile, list_codex_model_entries,
-    read_codex_runtime_profile_from_path, write_context_mode_to_config_path,
-    write_model_to_config_path, write_reasoning_effort_to_config_path,
-    write_service_tier_to_config_path,
-};
+pub(crate) use runtime::CodexModelEntry;
 pub(crate) use types::CompactRequest;

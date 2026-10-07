@@ -1,3 +1,18 @@
+# Daemon prerequisite / 官方 daemon 前置步骤
+
+安装配置中固定的 Codex 0.159.2，在与机器人相同的 CODEX_HOME 中准备订阅认证，并由运维运行：
+
+```bash
+export CODEX_HOME="$HOME/.codex-claw/.codex"
+mkdir -p "$CODEX_HOME/app-server-daemon"
+printf '%s\n' '{"remoteControlEnabled":false,"shutdownGraceSeconds":60,"updater":{"autoUpdateEnabled":false,"updateIntervalMinutes":120}}' > "$CODEX_HOME/app-server-daemon/settings.json"
+codex app-server daemon update --from-cli -y
+codex app-server daemon start
+codex app-server daemon version
+```
+
+机器人只连接 daemon socket，不执行这些启动或更新操作。启动时同时检查 CLI 和 daemon 的版本。构建使用 `CARGO_INCREMENTAL=0 cargo build --release --locked`。
+
 # Getting Started
 
 Installation, configuration, and first-run guide for CodexClaw.
@@ -7,7 +22,7 @@ Installation, configuration, and first-run guide for CodexClaw.
 ## Prerequisites
 
 - Rust toolchain (edition 2024)
-- OpenAI Codex CLI installed and authenticated; confirm that `codex exec --json "reply with exactly: ok"` runs successfully
+- OpenAI Codex CLI installed and authenticated; check that CLI and daemon versions match the configured pin
 - The system `~/.codex` directory already exists and contains at least `config.toml` and `auth.json`
 - QQ Open Platform account (personal verification required)
 
@@ -70,7 +85,7 @@ CODEX_CLAW_CONFIG=~/.codex-claw/codexclaw.toml ./target/release/codex-claw
 **Log troubleshooting tips:**
 - If access token retrieval fails -- check that `app_id` and `app_secret` are correct
 - If the Gateway connection fails -- check your network connection and `api_base_url`
-- If Codex fails to start -- confirm that `codex exec --json` runs successfully
+- If Codex fails to start -- check the pinned versions and daemon status in the configured CODEX_HOME
 
 On first launch, the system `~/.codex` directory's `config.toml`, `auth.json`, and `skills/` are automatically copied to `~/.codex-claw/.codex/` (existing files are not overwritten).
 
@@ -143,7 +158,6 @@ systemctl --user daemon-reload
 systemctl --user enable --now codexclaw
 ```
 
-> **Tip:** Since the `/self-update` command replaces the running binary and exits the current process, it is recommended to let an external service manager handle automatic restarts.
 
 ## Sandbox Mode
 
@@ -164,4 +178,3 @@ cargo build --release
 # Restart the service
 ```
 
-**Update via QQ:** Send `/self-update` and CodexClaw will automatically pull the latest code, compile, and replace the running binary.

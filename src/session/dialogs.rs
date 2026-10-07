@@ -53,8 +53,12 @@ pub(crate) enum DialogError {
 impl std::fmt::Display for DialogError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::BackgroundNotFound { alias, .. } => {
-                write!(f, "background session `{alias}` not found")
+            Self::BackgroundNotFound { alias, available } => {
+                write!(
+                    f,
+                    "background session `{alias}` not found; available: {}",
+                    available.join(", ")
+                )
             }
             Self::AliasExists { alias } => write!(f, "alias `{alias}` already exists"),
             Self::AliasHeldByForeground { alias } => {
@@ -295,9 +299,10 @@ impl<'a> Dialogs<'a> {
         usage: Option<TokenUsageSnapshot>,
     ) -> Option<String> {
         let (alias, origin) = self.user.background.iter().find_map(|(alias, dialog)| {
-            (dialog.generation == expected.generation
-                && dialog.session_id == expected.session_id
-                && dialog.workspace_dir == expected.workspace_dir)
+            (dialog.session_id.as_deref() == Some(session_id)
+                || (dialog.generation == expected.generation
+                    && dialog.session_id == expected.session_id
+                    && dialog.workspace_dir == expected.workspace_dir))
                 .then(|| (alias.clone(), dialog.origin))
         })?;
         let dialog = self.user.background.get_mut(&alias)?;
@@ -329,11 +334,6 @@ impl<'a> Dialogs<'a> {
     }
 
     /// Drop `session_id` from the saved-session ledger.
-    pub(super) fn drop_saved_session(&mut self, session_id: &str) {
-        self.user
-            .saved_local_session_ids
-            .retain(|value| value != session_id);
-    }
 
     /// The name the foreground dialog will reclaim the next time it is
     /// parked. Placing *another* dialog there would silently steal it, so

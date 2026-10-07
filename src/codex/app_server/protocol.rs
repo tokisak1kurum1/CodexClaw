@@ -4,8 +4,8 @@
 //! - `/tmp/openai-codex/codex-rs/app-server-protocol/src/protocol/{common,v1,v2}.rs`
 //! - `/tmp/openai-codex/codex-rs/protocol/src/{config_types,plan_tool}.rs`
 //!
-//! Field names and enum tagging match the wire format emitted by the installed
-//! `codex app-server` binary (verified empirically with `/tmp/codex-probe`).
+//! Wire fields follow the 0.159.2 generated experimental schema and the pinned
+//! upstream reference 7c2ce90716335c889a5076ded9a630459f9c9899.
 //!
 //! `dead_code` is allowed for the whole module on purpose. These types are a
 //! transcription of somebody else's schema, so their shape is dictated by the
@@ -99,6 +99,13 @@ pub(crate) struct InitializeResponse {
 #[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ThreadStartParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) developer_instructions: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) ephemeral: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) dynamic_tools: Option<Vec<JsonValue>>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -457,6 +464,7 @@ pub(crate) struct ItemPayload {
     #[serde(default)]
     pub(crate) changes: Vec<FileChange>,
     #[serde(default)]
+    #[serde(rename = "serverName", alias = "server")]
     pub(crate) server: Option<String>,
     #[serde(default)]
     pub(crate) tool: Option<String>,
@@ -636,6 +644,8 @@ pub(crate) struct FileChangeApprovalParams {
 pub(crate) struct PermissionsApprovalParams {
     pub(crate) thread_id: String,
     #[serde(default)]
+    pub(crate) turn_id: Option<String>,
+    #[serde(default)]
     pub(crate) reason: Option<String>,
     #[serde(default)]
     pub(crate) permissions: JsonValue,
@@ -648,6 +658,9 @@ pub(crate) struct PermissionsApprovalParams {
 pub(crate) struct McpElicitationParams {
     pub(crate) thread_id: String,
     #[serde(default)]
+    pub(crate) turn_id: Option<String>,
+    #[serde(default)]
+    #[serde(rename = "serverName", alias = "server")]
     pub(crate) server: Option<String>,
     #[serde(default)]
     pub(crate) request: JsonValue,
@@ -900,4 +913,18 @@ mod tests {
         assert_eq!(p.command.unwrap(), "/bin/zsh -lc \"...\"");
         assert_eq!(p.available_decisions.len(), 3);
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TurnSteerParams {
+    pub thread_id: String,
+    pub client_user_message_id: Option<String>,
+    pub input: Vec<TurnInputItem>,
+    pub expected_turn_id: String,
+}
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TurnSteerResponse {
+    pub turn_id: String,
 }

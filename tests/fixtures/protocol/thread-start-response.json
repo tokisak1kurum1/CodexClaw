@@ -1,0 +1,10 @@
+{
+  "thread": {
+    "id": "thread-a",
+    "cwd": "/home/bot/users/a/workspace",
+    "ephemeral": false,
+    "futureField": true
+  },
+  "model": "default-model",
+  "futureField": true
+}

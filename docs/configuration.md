@@ -1,156 +1,51 @@
-*Read this in: [English](configuration_en.md) | [中文](configuration.md)*
+# 配置
 
-# CodexClaw 配置参考 (Configuration Reference)
-
-本文档描述 CodexClaw 的全部配置项。配置文件使用 TOML 格式。
-
----
-
-## 配置文件加载顺序
-
-CodexClaw 按以下顺序查找配置文件，使用第一个找到的文件：
-
-1. 环境变量 `CODEX_CLAW_CONFIG` 指定的路径（如果设置）
-2. 当前工作目录下的 `./codexclaw.toml`
-3. 回退路径 `~/.codex-claw/codexclaw.toml`
-
-### 启动校验
-
-以下字段为必填项，不能为空字符串，否则程序启动将失败：
-
-- `qq.app_id`
-- `qq.app_secret`
-- `general.self_build_command`
-
----
-
-## 路径处理说明
-
-- **波浪号展开**：常规路径字段的前缀 `~` 会在运行时展开为 `$HOME`。相对的 `self_binary_path` 会先拼到已规范化的 `self_repo_dir`，因此不要在该字段中使用 `~/...`。
-- **路径规范化**：加载时会尝试 `canonicalize`；目标尚不存在时保留已转成绝对形式的路径，不保证消除其中的 `..`。
-- **相对路径**：常规相对路径以 CodexClaw 进程当前工作目录为基准；`self_binary_path` 以 `self_repo_dir` 为基准。
-
----
-
-## `[general]` — 通用配置
-
-控制运行时目录、Codex CLI 调用方式、以及自更新行为。
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `timezone` | String (IANA tz) | `"Asia/Shanghai"` | 用户时间戳使用的时区（IANA 时区名称）。启动时通过 chrono_tz 校验，必须为有效时区 |
-| `data_dir` | PathBuf | `~/.codex-claw/data` | 所有持久化运行时数据的根目录 |
-| `system_codex_home` | PathBuf | `~/.codex` | 系统 Codex 安装目录 |
-| `codex_home_global` | PathBuf | `~/.codex-claw/.codex` | 全局 Codex 配置的 Home 目录 |
-| `default_workspace_dir` | PathBuf | `~/.codex-claw/data/session/workspace` | 新建临时会话的默认工作目录 |
-| `codex_binary` | String | `"codex"` | Codex CLI 可执行文件路径或命令名；裸命令名必须能从 PATH 解析 |
-| `default_model` | String | `"gpt-5.4"` | 新建会话的默认模型 |
-| `default_reasoning_effort` | ReasoningEffort | `"medium"` | 默认推理深度，可选值：`none` / `minimal` / `low` / `medium` / `high` / `xhigh` |
-| `self_repo_dir` | PathBuf | `"."` | CodexClaw 仓库根目录（用于 `/self-update` 命令） |
-| `self_build_command` | String | `"cargo build --release"` | 自更新时执行的编译命令（**必填，不可为空**） |
-| `self_binary_path` | PathBuf | `"./target/release/codex-claw"` | 编译产物路径，相对于 self_repo_dir |
-
----
-
-## `[qq]` — QQ 机器人配置
-
-配置 QQ 开放平台的认证信息和 API 端点。
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `app_id` | String | **(必填)** | QQ 机器人 AppID |
-| `app_secret` | String | **(必填)** | QQ 机器人 AppSecret |
-| `api_base_url` | String | `"https://sandbox.api.sgroup.qq.com"` | QQ API 端点。正式环境请改为 `https://api.sgroup.qq.com` |
-| `token_url` | String | `"https://bots.qq.com/app/getAppAccessToken"` | Token 获取端点 |
-
-> **注意**：默认的 `api_base_url` 指向沙箱环境。部署到生产环境时，务必将其改为
-> `https://api.sgroup.qq.com`。
-
----
-
-## `[shadow]` — 后台蒸馏配置
-
-控制后台记忆蒸馏模块的行为。当 `enabled = false` 时，整个 shadow 子系统不会运行。
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `enabled` | bool | `true` | 是否启用后台记忆蒸馏 |
-| `memory_min_user_chars` | usize | `40` | 触发记忆蒸馏的最小用户消息长度（字符数） |
-| `memory_reasoning` | String | `"low"` | 记忆蒸馏使用的推理深度 |
-| `memory_model` | String | `""` | 记忆蒸馏使用的模型。留空则跟随当前会话模型 |
-| `memory_deadline_secs` | u64 | `120` | 单次蒸馏超时时间（秒） |
-
----
-
-## `[scheduler]` — 调度器配置
-
-控制定时任务调度器。调度器支持 cron 表达式触发任务，并内置重试、熔断机制。
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `enabled` | bool | `true` | 是否启用调度器 |
-| `tick_secs` | u64 | `30` | 调度器轮询间隔（秒） |
-| `default_tz` | String | `"Asia/Shanghai"` | 定时任务的默认时区（IANA 时区名称）。与 general.timezone 不同，此字段启动时不校验，直接传入 |
-| `max_concurrent_jobs` | usize | `4` | 最大并发任务数 |
-| `max_turn_secs` | u64 | `600` | 单次任务执行超时（秒） |
-| `max_attempts` | u32 | `3` | 单次运行最大重试次数 |
-| `retry_backoff_secs` | u64 | `30` | 重试间隔（秒） |
-| `circuit_breaker_threshold` | u32 | `5` | 连续失败阈值，达到后任务自动停用 |
-| `runs_retention` | usize | `30` | 保留最近 N 次运行日志 |
-
----
-
-## 完整配置示例
-
-以下是一份包含所有字段的完整配置文件，可作为起始模板使用。仓库中的 `config/codexclaw.example.toml` 是权威的配置模板，推荐以该文件为准。
+加载顺序：CODEX_CLAW_CONFIG → 当前目录 codexclaw.toml → ~/.codex-claw/codexclaw.toml。以下为完整示例：
 
 ```toml
-# ============================================================
-#  CodexClaw 配置文件
-#  复制此文件到以下任一位置：
-#    - ./codexclaw.toml（当前工作目录）
-#    - ~/.codex-claw/codexclaw.toml（用户目录）
-#  或者通过 CODEX_CLAW_CONFIG 环境变量指定路径。
-# ============================================================
-
-# --- 通用配置 ---------------------------------------------------
-[general]
-timezone               = "Asia/Shanghai"
-data_dir              = "~/.codex-claw/data"
-system_codex_home     = "~/.codex"
-codex_home_global     = "~/.codex-claw/.codex"
-default_workspace_dir = "~/.codex-claw/data/session/workspace"
-codex_binary          = "codex"
-default_model         = "gpt-5.4"
-default_reasoning_effort = "medium"      # none | minimal | low | medium | high | xhigh
-self_repo_dir         = "."
-self_build_command    = "cargo build --release"
-self_binary_path      = "./target/release/codex-claw"
-
-# --- QQ 机器人 --------------------------------------------------
 [qq]
-app_id       = "YOUR_APP_ID"             # (必填) 替换为你的 AppID
-app_secret   = "YOUR_APP_SECRET"         # (必填) 替换为你的 AppSecret
-api_base_url = "https://sandbox.api.sgroup.qq.com"   # 正式环境改为 https://api.sgroup.qq.com
-token_url    = "https://bots.qq.com/app/getAppAccessToken"
+app_id = "YOUR_QQ_APP_ID"
+app_secret = "YOUR_QQ_APP_SECRET"
+allowed_users = [] # 建议填写允许使用机器人的 QQ openid；空数组允许所有 C2C 用户
 
-# --- 后台蒸馏 ---------------------------------------------------
-[shadow]
-enabled              = true
-memory_min_user_chars = 40               # 用户消息少于此字符数时不触发记忆蒸馏
-memory_reasoning     = "low"
-memory_model         = ""                # 留空 = 跟随会话模型
-memory_deadline_secs = 120
+[codex]
+expected_version = "0.159.2"
 
-# --- 调度器 -----------------------------------------------------
+[general]
+data_dir = "~/.codex-claw/data"
+codex_home_global = "~/.codex-claw/.codex"
+system_codex_home = "~/.codex"
+codex_binary = "codex"
+timezone = "Asia/Shanghai"
+
+[runtime]
+max_concurrent_codex = 2
+max_concurrent_per_user = 1
+max_concurrent_scheduled = 1
+max_concurrent_memory = 1
+
 [scheduler]
-enabled                  = true
-tick_secs                = 30
-default_tz               = "Asia/Shanghai"
-max_concurrent_jobs      = 4
-max_turn_secs            = 600           # 10 分钟
-max_attempts             = 3
-retry_backoff_secs       = 30
-circuit_breaker_threshold = 5            # 连续失败 5 次后自动停用
-runs_retention           = 30
+agent_misfire_grace_secs = 600
+reminder_misfire_grace_secs = 1800
+catch_up_missed = false
+
+[memory]
+model = "gpt-5.6-luna"
+distill_after_turns = 12
+distill_idle_secs = 120
+relevant_limit = 8
+hot_memory_max_chars = 4000
+single_memory_max_chars = 300
+
+[attachments]
+max_file_bytes = 33554432
+per_user_quota_bytes = 268435456
+retention_hours = 24
+
 ```
+
+并发上限为全局最多 2，每用户、定时 agent、memory 各 1。catch_up_missed 必须为 false。模型空值表示 daemon 默认；菜单从 model/list 获取，缓存 5 分钟，并在 daemon 连接变化后刷新。QQ 用户设置只写 SQLite，不修改共享 config.toml。
+
+BEHAVIOR.md 最多 8000 字符，IDENTITY.md 500，CHARACTER.md 16000，profile 4000，热记忆默认 4000；单条 memory 300。三份角色文件仅在新 thread 创建时注入，当前 thread 固定使用创建时的角色版本；旧 SOUL.md 不再读取。BEHAVIOR.md 缺失时使用编译内置默认规则；运行时同名文件会覆盖默认内容。附件单文件默认 32 MiB，单用户 256 MiB，24 h 清理。附件和输出文件必须位于当前用户的目录。
+
+官方 daemon 使用相同 CODEX_HOME，必须由运维单独准备和启动。CodexClaw 仅检查固定版本并通过 Unix socket WebSocket 连接 daemon。

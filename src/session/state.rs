@@ -2,11 +2,7 @@
 //! [`crate::model::settings`]. The paths stay here so `crate::session::state::*`
 //! keeps resolving for every existing call site.
 
-pub(crate) use crate::model::settings::{
-    ApprovalPolicySetting, CommandAlias, DialogOrigin, DialogProfile, DialogState,
-    ImportedSessionProfile, PendingSetting, PersistedSessionState, SessionSettings,
-    TokenUsageSnapshot, UserSessionState, default_language,
-};
+pub(crate) use crate::model::settings::TokenUsageSnapshot;
 /// These four stay `pub`: they are fields of [`crate::codex::ExecutionRequest`],
 /// which the app-server smoke test builds by hand, so they have to be nameable
 /// from outside the crate.

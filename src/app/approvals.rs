@@ -34,24 +34,102 @@ impl App {
     }
 
     async fn route_approval_request(self: Arc<Self>, request: ApprovalRequest) {
-        let Some(ctx) = self.active_openid.lock().await.clone() else {
-            // No active turn owner — decline so the server can proceed.
-            warn!("approval request arrived with no active turn owner; declining");
+        let thread_id = match &request {
+            ApprovalRequest::Command { event, .. } => &event.thread_id,
+            ApprovalRequest::FileChange { event, .. } => &event.thread_id,
+            ApprovalRequest::Permissions { event, .. } => &event.thread_id,
+            ApprovalRequest::Elicitation { event, .. } => &event.thread_id,
+            ApprovalRequest::Tool { thread_id, .. } => thread_id,
+        };
+        let owner = self
+            .codex
+            .handle()
+            .supervisor
+            .thread_owners
+            .lock()
+            .await
+            .get(thread_id)
+            .cloned();
+        let ctx = {
+            let mut turns = self.active_turns.lock().await;
+            if let Some(owner) = owner {
+                if let Some(active) = turns.for_user(&owner) {
+                    if active.thread_id.is_empty() {
+                        turns.bind(&owner, thread_id, None);
+                    }
+                }
+            }
+            turns.for_thread(thread_id)
+        };
+        let Some(ctx) = ctx else {
             decline_approval_request(request);
             return;
         };
-        let openid = ctx.openid.clone();
-        let reply_id = ctx.reply_message_id.clone();
+        let request_turn = match &request {
+            ApprovalRequest::Tool { turn_id, .. } => Some(turn_id.as_str()),
+            ApprovalRequest::Command { event, .. } => event.turn_id.as_deref(),
+            ApprovalRequest::FileChange { event, .. } => event.turn_id.as_deref(),
+            ApprovalRequest::Permissions { event, .. } => event.turn_id.as_deref(),
+            ApprovalRequest::Elicitation { event, .. } => event.turn_id.as_deref(),
+        };
+        if request_turn.is_some_and(|turn| !ctx.turn_id.is_empty() && ctx.turn_id != turn) {
+            decline_approval_request(request);
+            return;
+        }
+        let openid = ctx.user_id.clone();
+        let reply_id = ctx.message_id.clone();
         match request {
+            ApprovalRequest::Tool {
+                tool,
+                arguments,
+                reply,
+                ..
+            } => {
+                let result = if tool.starts_with("schedule_") {
+                    crate::scheduler::cli::call(
+                        &self.state,
+                        &self.config,
+                        &openid,
+                        &tool,
+                        &arguments,
+                    )
+                } else {
+                    crate::memory::tools::call(&self.memory, &openid, &tool, &arguments)
+                };
+                let (success, text) = match result {
+                    Ok(v) => (true, v.to_string()),
+                    Err(e) => (false, e.to_string()),
+                };
+                let _ = reply.send(serde_json::json!({"success":success,"contentItems":[{"type":"inputText","text":text}]}));
+            }
+
             ApprovalRequest::Command { event, reply } => {
                 let prompt = format_command_approval(&event);
                 self.enqueue_outcome(openid.clone(), reply_id, prompt, reply)
                     .await;
             }
             ApprovalRequest::FileChange { event, reply } => {
-                let prompt = format_file_change_approval(&event);
-                self.enqueue_outcome(openid.clone(), reply_id, prompt, reply)
-                    .await;
+                let root = self
+                    .config
+                    .general
+                    .data_dir
+                    .parent()
+                    .unwrap_or(&self.config.general.data_dir);
+                if changes_protected_persona_file(&event.file_changes, root) {
+                    tracing::warn!(user=%openid, thread_id=%event.thread_id, "blocked agent write to protected persona file");
+                    let _ = reply.send(ApprovalOutcome::Decline);
+                    let _ = self
+                        .reply_text(
+                            &openid,
+                            &reply_id,
+                            "BEHAVIOR.md / IDENTITY.md / CHARACTER.md are protected and cannot be changed by an agent file write.",
+                        )
+                        .await;
+                } else {
+                    let prompt = format_file_change_approval(&event);
+                    self.enqueue_outcome(openid.clone(), reply_id, prompt, reply)
+                        .await;
+                }
             }
             ApprovalRequest::Permissions { event, reply } => {
                 let prompt = format_permissions_approval(&event);
@@ -115,6 +193,9 @@ impl App {
 
 fn decline_approval_request(request: ApprovalRequest) {
     match request {
+        ApprovalRequest::Tool { reply, .. } => {
+            let _ = reply.send(serde_json::json!({"success":false,"contentItems":[{"type":"inputText","text":"no active owned turn"}]}));
+        }
         ApprovalRequest::Command { reply, .. } => {
             let _ = reply.send(ApprovalOutcome::Decline);
         }
@@ -127,6 +208,34 @@ fn decline_approval_request(request: ApprovalRequest) {
         ApprovalRequest::Elicitation { reply, .. } => {
             let _ = reply.send(None);
         }
+    }
+}
+
+fn changes_protected_persona_file(payload: &serde_json::Value, root: &std::path::Path) -> bool {
+    fn matches(path: &str, root: &std::path::Path) -> bool {
+        let candidate = std::path::Path::new(path);
+        if !candidate.is_absolute() {
+            return false;
+        }
+        candidate == root.join("BEHAVIOR.md")
+            || candidate == root.join("IDENTITY.md")
+            || candidate == root.join("CHARACTER.md")
+    }
+    match payload {
+        serde_json::Value::Object(map) => map.iter().any(|(path, value)| {
+            matches(path, root)
+                || value
+                    .get("path")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|path| matches(path, root))
+        }),
+        serde_json::Value::Array(entries) => entries.iter().any(|value| {
+            value
+                .get("path")
+                .and_then(|value| value.as_str())
+                .is_some_and(|path| matches(path, root))
+        }),
+        _ => false,
     }
 }
 
@@ -201,4 +310,35 @@ fn summarize_file_changes(payload: &serde_json::Value) -> String {
         return String::new();
     }
     paths.join(", ")
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::changes_protected_persona_file;
+
+    #[test]
+    fn protected_persona_file_detection_is_exact() {
+        let root = std::path::Path::new("/srv/codex-claw");
+        assert!(changes_protected_persona_file(
+            &serde_json::json!({"/srv/codex-claw/BEHAVIOR.md":{"type":"update"}}),
+            root,
+        ));
+        assert!(changes_protected_persona_file(
+            &serde_json::json!({"/srv/codex-claw/CHARACTER.md":{"type":"update"}}),
+            root,
+        ));
+        assert!(changes_protected_persona_file(
+            &serde_json::json!([{"path":"/srv/codex-claw/IDENTITY.md"}]),
+            root,
+        ));
+        assert!(!changes_protected_persona_file(
+            &serde_json::json!({"CHARACTER.md":{"type":"update"}}),
+            root,
+        ));
+        assert!(!changes_protected_persona_file(
+            &serde_json::json!({"/tmp/project/CHARACTER.md":{"type":"update"}}),
+            root,
+        ));
+    }
 }

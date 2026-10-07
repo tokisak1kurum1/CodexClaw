@@ -1,38 +1,38 @@
-[general]
-# timezone = "Asia/Shanghai"   # IANA tz for user-facing timestamps
-data_dir = "~/.codex-claw/data"
-system_codex_home = "~/.codex"
-codex_home_global = "~/.codex-claw/.codex"
-default_workspace_dir = "~/.codex-claw/data/session/workspace"
-codex_binary = "codex"
-default_model = "gpt-5.4"
-default_reasoning_effort = "medium"
-self_repo_dir = "."
-self_build_command = "cargo build --release"
-self_binary_path = "./target/release/codex-claw"
-
 [qq]
-app_id = "YOUR_APP_ID"
-app_secret = "YOUR_APP_SECRET"
-api_base_url = "https://sandbox.api.sgroup.qq.com"
-token_url = "https://bots.qq.com/app/getAppAccessToken"
+app_id = "YOUR_QQ_APP_ID"
+app_secret = "YOUR_QQ_APP_SECRET"
+allowed_users = [] # Recommended: restrict the bot to your QQ openid(s); empty allows all C2C users
 
-[shadow]
-# Hermes-style background distillation of memory (~/.codex-claw/data/memory/<openid>/*.md).
-# Runs silently after each turn.
-enabled = true
-memory_min_user_chars = 40
-memory_reasoning = "low"
-memory_model = ""              # empty = follow session model
-memory_deadline_secs = 120
+[codex]
+expected_version = "0.159.2"
+
+[general]
+data_dir = "~/.codex-claw/data"
+codex_home_global = "~/.codex-claw/.codex"
+system_codex_home = "~/.codex"
+codex_binary = "codex"
+timezone = "Asia/Shanghai"
+
+[runtime]
+max_concurrent_codex = 2
+max_concurrent_per_user = 1
+max_concurrent_scheduled = 1
+max_concurrent_memory = 1
 
 [scheduler]
-enabled = true
-tick_secs = 30
-default_tz = "Asia/Shanghai"
-max_concurrent_jobs = 4
-max_turn_secs = 600
-max_attempts = 3
-retry_backoff_secs = 30
-circuit_breaker_threshold = 5
-runs_retention = 30
+agent_misfire_grace_secs = 600
+reminder_misfire_grace_secs = 1800
+catch_up_missed = false
+
+[memory]
+model = "gpt-5.6-luna"
+distill_after_turns = 12
+distill_idle_secs = 120
+relevant_limit = 8
+hot_memory_max_chars = 4000
+single_memory_max_chars = 300
+
+[attachments]
+max_file_bytes = 33554432
+per_user_quota_bytes = 268435456
+retention_hours = 24

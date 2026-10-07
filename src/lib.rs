@@ -8,10 +8,10 @@ pub mod memory;
 pub(crate) mod model;
 pub mod qq;
 pub mod scheduler;
-pub(crate) mod self_update;
 pub mod session;
-pub mod shadow;
+pub mod state;
 pub(crate) mod util;
+pub mod work_queue;
 
 /// The inbound-message value types now live in [`model::message`]; re-exported
 /// at the crate root so `crate::message::*` keeps resolving.

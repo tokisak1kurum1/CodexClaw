@@ -21,6 +21,9 @@ pub struct ExecutionRequest {
     pub context_mode: Option<ContextMode>,
     pub reasoning_effort: ReasoningEffort,
     pub image_paths: Vec<PathBuf>,
+    pub developer_instructions: Option<String>,
+    pub ephemeral: bool,
+    pub owner_user_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -46,6 +49,10 @@ pub struct ExecutionResult {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutionUpdate {
+    TurnStarted {
+        thread_id: String,
+        turn_id: String,
+    },
     /// Emitted once, as soon as the turn's thread is established, so the caller
     /// learns the thread id even if the turn is later interrupted or fails
     /// before producing an ExecutionResult.

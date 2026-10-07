@@ -1,0 +1,246 @@
+{
+  "users": {
+    "openid-1": {
+      "foreground": {
+        "session_id": "fg-session",
+        "origin": "global",
+        "workspace_dir": "/home/u/ws",
+        "saved": true,
+        "profile": {
+          "model_override": "gpt-5-codex",
+          "reasoning_effort": "minimal",
+          "service_tier": "fast",
+          "context_mode": "standard"
+        },
+        "last_usage": {
+          "total_tokens": 1234,
+          "window": 272000,
+          "input_tokens": 1000,
+          "cached_input_tokens": 900,
+          "output_tokens": 234,
+          "updated_at": "2023-11-14T22:13:20Z"
+        },
+        "generation": 7,
+        "alias": "home"
+      },
+      "background": {
+        "bg1": {
+          "session_id": null,
+          "origin": "local",
+          "workspace_dir": "/home/u/bg",
+          "saved": false,
+          "profile": null,
+          "last_usage": null,
+          "generation": 0,
+          "alias": "bg1"
+        }
+      },
+      "background_order": [
+        "bg1"
+      ],
+      "settings": {
+        "model_override": "gpt-5",
+        "reasoning_effort": "xhigh",
+        "service_tier": "flex",
+        "context_mode": "1m",
+        "verbose": true,
+        "plan_mode": true,
+        "approval_policy_override": "guardian-subagent",
+        "pending_plan": "plan text",
+        "language": "zh"
+      },
+      "alias_seq": 3,
+      "last_projects_view": [
+        "p1"
+      ],
+      "last_sessions_view": [
+        "s1"
+      ],
+      "last_import_projects_view": [
+        "ip1"
+      ],
+      "last_cron_view": [
+        "01CRONVIEW"
+      ],
+      "last_import_sessions_view": [
+        "is1"
+      ],
+      "saved_local_session_ids": [
+        "sl1"
+      ],
+      "command_aliases": {
+        "a": {
+          "name": "a",
+          "commands": [
+            "/help"
+          ],
+          "created_at": "2023-11-14T22:13:31Z"
+        }
+      },
+      "pending_setting": {
+        "kind": "loadbg_sessions",
+        "project_key": "pk",
+        "page": 2,
+        "alias": "al"
+      },
+      "pending_park_alias": "held"
+    }
+  },
+  "imported_profiles": {
+    "imp": {
+      "workspace_dir": "/imp/ws",
+      "model_override": "gpt-5",
+      "reasoning_effort": "none",
+      "service_tier": "fast",
+      "context_mode": "1m"
+    }
+  },
+  "cron_jobs": {
+    "job-exec": {
+      "id": "job-exec",
+      "owner_openid": "openid-3",
+      "title": "exec",
+      "kind": {
+        "type": "one-shot",
+        "at": "2023-11-14T22:13:27Z"
+      },
+      "action": {
+        "type": "codex-exec",
+        "prompt": "run",
+        "model": null,
+        "extra_args": [
+          "--full-auto"
+        ],
+        "env": {
+          "K": "V"
+        }
+      },
+      "workspace_dir": "/tmp/ws3",
+      "deliver": {
+        "type": "log-only"
+      },
+      "created_at": "2023-11-14T22:13:28Z",
+      "next_run_at": null,
+      "run_now_at": null,
+      "last_run_at": null,
+      "last_run_status": {
+        "type": "skipped",
+        "reason": "no-op"
+      },
+      "run_count": 0,
+      "failure_streak": 0,
+      "disabled": false
+    },
+    "job-oneshot": {
+      "id": "job-oneshot",
+      "owner_openid": "openid-2",
+      "title": "once",
+      "kind": {
+        "type": "one-shot",
+        "at": "2023-11-14T22:13:25Z"
+      },
+      "action": {
+        "type": "reminder",
+        "message": "ping"
+      },
+      "workspace_dir": "/tmp/ws2",
+      "deliver": {
+        "type": "push-if-non-empty"
+      },
+      "created_at": "2023-11-14T22:13:26Z",
+      "next_run_at": null,
+      "run_now_at": null,
+      "last_run_at": null,
+      "last_run_status": {
+        "type": "failure",
+        "error": "boom",
+        "attempt": 1
+      },
+      "run_count": 0,
+      "failure_streak": 0,
+      "disabled": false
+    },
+    "job-recurring": {
+      "id": "job-recurring",
+      "owner_openid": "openid-1",
+      "title": "daily",
+      "kind": {
+        "type": "recurring",
+        "cron": "0 9 * * *",
+        "tz": "Asia/Shanghai"
+      },
+      "action": {
+        "type": "codex-turn",
+        "prompt": "do it",
+        "model": "gpt-5",
+        "session_state": {
+          "session_id": "sess-1",
+          "settings": {
+            "model_override": "gpt-5",
+            "reasoning_effort": "xhigh",
+            "service_tier": "flex",
+            "context_mode": "1m",
+            "verbose": true,
+            "plan_mode": true,
+            "approval_policy_override": "guardian-subagent",
+            "pending_plan": "plan text",
+            "language": "zh"
+          }
+        },
+        "approval_policy": "unless-trusted",
+        "session_strategy": "persistent",
+        "interactive": {
+          "reply_ttl_secs": 60,
+          "end_signal": "<<<END>>>",
+          "max_rounds_hard_cap": 3
+        }
+      },
+      "workspace_dir": "/tmp/ws",
+      "deliver": {
+        "type": "push-truncated",
+        "max_chars": 100
+      },
+      "created_at": "2023-11-14T22:13:21Z",
+      "next_run_at": "2023-11-14T22:13:22Z",
+      "run_now_at": "2023-11-14T22:13:23Z",
+      "last_run_at": "2023-11-14T22:13:24Z",
+      "last_run_status": {
+        "type": "success",
+        "duration_ms": 12,
+        "output_chars": 34
+      },
+      "run_count": 7,
+      "failure_streak": 2,
+      "disabled": true
+    },
+    "job-shell": {
+      "id": "job-shell",
+      "owner_openid": "openid-4",
+      "title": "shell",
+      "kind": {
+        "type": "one-shot",
+        "at": "2023-11-14T22:13:29Z"
+      },
+      "action": {
+        "type": "shell",
+        "program": "echo",
+        "args": [
+          "hi"
+        ],
+        "env": {}
+      },
+      "workspace_dir": "/tmp/ws4",
+      "deliver": {
+        "type": "push-to-owner"
+      },
+      "created_at": "2023-11-14T22:13:30Z",
+      "next_run_at": null,
+      "run_now_at": null,
+      "last_run_at": null,
+      "last_run_status": null,
+      "run_count": 0,
+      "failure_streak": 0,
+      "disabled": false
+    }
+  }
+}

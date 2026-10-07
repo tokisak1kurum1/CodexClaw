@@ -1,0 +1,10 @@
+{
+  "threadId": "thread-a",
+  "turnId": "turn-a",
+  "error": {
+    "message": "request failed",
+    "additionalDetails": null
+  },
+  "willRetry": false,
+  "futureField": true
+}

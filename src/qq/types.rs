@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 pub(crate) const DISPATCH_EVENT: u32 = 0;
 pub(crate) const HEARTBEAT_EVENT: u32 = 1;
@@ -11,7 +11,7 @@ pub(crate) const HEARTBEAT_ACK_EVENT: u32 = 11;
 pub(crate) const MSG_TYPE_QUOTE: u32 = 103;
 pub(crate) const INTENT_GROUP_AND_C2C: u32 = 1 << 25;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct GatewayEnvelope {
     pub(crate) op: u32,
     #[serde(default)]
@@ -22,22 +22,22 @@ pub(crate) struct GatewayEnvelope {
     pub(crate) t: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct GatewayInfo {
     pub(crate) url: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct HelloPayload {
     pub(crate) heartbeat_interval: u64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ReadyPayload {
     pub(crate) session_id: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct C2CMessageEvent {
     pub(crate) id: String,
     #[serde(default)]
@@ -51,12 +51,12 @@ pub struct C2CMessageEvent {
     pub(crate) msg_elements: Vec<MsgElement>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct EventAuthor {
     pub(crate) user_openid: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct MessageAttachment {
     pub(crate) content_type: String,
     pub(crate) url: String,
@@ -64,7 +64,7 @@ pub(crate) struct MessageAttachment {
     pub(crate) filename: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct MsgElement {
     #[serde(default)]
     pub(crate) msg_idx: Option<String>,
