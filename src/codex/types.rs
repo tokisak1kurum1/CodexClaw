@@ -61,6 +61,7 @@ pub enum ExecutionUpdate {
     },
     AgentMessage {
         text: String,
+        phase: Option<String>,
     },
     ToolCall {
         display: String,

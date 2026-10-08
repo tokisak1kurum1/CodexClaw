@@ -2,17 +2,24 @@ use super::StateDb;
 use anyhow::Result;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
+
 #[derive(Serialize, Deserialize)]
 pub struct Delivery {
     pub text: String,
     pub directives: Vec<crate::qq::Directive>,
 }
+
 pub struct OutboxRow {
     pub id: i64,
     pub user: String,
     pub reply_to: Option<String>,
     pub payload: Delivery,
+    pub text_sent: bool,
+    pub directives_sent: usize,
 }
+
+const MAX_DELIVERY_ATTEMPTS: i64 = 3;
+
 impl StateDb {
     pub fn enqueue_delivery(
         &self,
@@ -21,15 +28,107 @@ impl StateDb {
         key: &str,
         payload: &Delivery,
     ) -> Result<()> {
-        self.with(|db|{db.execute("INSERT OR IGNORE INTO outbox(user_id,reply_to_message_id,payload_json,created_at,logical_key) VALUES(?1,?2,?3,?4,?5)",params![user,reply,serde_json::to_string(payload)?,chrono::Utc::now().timestamp(),key])?;Ok(())})
+        self.with(|db| {
+            db.execute(
+                "INSERT OR IGNORE INTO outbox(user_id,reply_to_message_id,payload_json,created_at,logical_key) VALUES(?1,?2,?3,?4,?5)",
+                params![user, reply, serde_json::to_string(payload)?, chrono::Utc::now().timestamp(), key],
+            )?;
+            Ok(())
+        })
     }
+
     pub fn next_delivery(&self) -> Result<Option<OutboxRow>> {
-        self.with(|db|{let tx=db.transaction()?;let row={let mut q=tx.prepare("SELECT id,user_id,reply_to_message_id,payload_json FROM outbox WHERE state='pending' AND next_attempt_at<=?1 ORDER BY id LIMIT 1")?;let mut rows=q.query([chrono::Utc::now().timestamp()])?;if let Some(r)=rows.next()?{Some(OutboxRow{id:r.get(0)?,user:r.get(1)?,reply_to:r.get(2)?,payload:serde_json::from_str(&r.get::<_,String>(3)?)?})}else{None}};if let Some(r)=&row{tx.execute("UPDATE outbox SET state='sending',attempts=attempts+1 WHERE id=?1",[r.id])?;}tx.commit()?;Ok(row)})
+        self.with(|db| {
+            let tx = db.transaction()?;
+            let row = {
+                let mut stmt = tx.prepare(
+                    "SELECT id,user_id,reply_to_message_id,payload_json,text_sent,directives_sent
+                     FROM outbox WHERE state='pending' AND next_attempt_at<=?1
+                     ORDER BY id LIMIT 1",
+                )?;
+                let mut rows = stmt.query([chrono::Utc::now().timestamp()])?;
+                if let Some(r) = rows.next()? {
+                    Some(OutboxRow {
+                        id: r.get(0)?,
+                        user: r.get(1)?,
+                        reply_to: r.get(2)?,
+                        payload: serde_json::from_str(&r.get::<_, String>(3)?)?,
+                        text_sent: r.get::<_, i64>(4)? != 0,
+                        directives_sent: r.get::<_, i64>(5)? as usize,
+                    })
+                } else {
+                    None
+                }
+            };
+            if let Some(row) = &row {
+                tx.execute(
+                    "UPDATE outbox SET state='sending',attempts=attempts+1 WHERE id=?1 AND state='pending'",
+                    [row.id],
+                )?;
+            }
+            tx.commit()?;
+            Ok(row)
+        })
     }
-    pub fn finish_delivery(&self, user: &str, id: i64, error: Option<&str>) -> Result<()> {
-        self.with(|db|{if let Some(error)=error{db.execute("UPDATE outbox SET state='pending',last_error=?3,next_attempt_at=?4 WHERE user_id=?1 AND id=?2",params![user,id,error,chrono::Utc::now().timestamp()+30])?;}else{db.execute("UPDATE outbox SET state='delivered',delivered_at=?3 WHERE user_id=?1 AND id=?2",params![user,id,chrono::Utc::now().timestamp()])?;}Ok(())})
+
+    pub fn mark_delivery_text_sent(&self, user: &str, id: i64) -> Result<()> {
+        self.with(|db| {
+            anyhow::ensure!(
+                db.execute(
+                    "UPDATE outbox SET text_sent=1 WHERE user_id=?1 AND id=?2 AND state='sending'",
+                    params![user, id],
+                )? == 1,
+                "cannot mark text for non-sending delivery"
+            );
+            Ok(())
+        })
+    }
+
+    pub fn mark_delivery_directive_sent(&self, user: &str, id: i64, completed: usize) -> Result<()> {
+        self.with(|db| {
+            anyhow::ensure!(
+                db.execute(
+                    "UPDATE outbox SET directives_sent=?3
+                     WHERE user_id=?1 AND id=?2 AND state='sending' AND directives_sent=?4",
+                    params![user, id, completed as i64, (completed - 1) as i64],
+                )? == 1,
+                "invalid directive progress transition"
+            );
+            Ok(())
+        })
+    }
+
+    pub fn finish_delivery(
+        &self,
+        user: &str,
+        id: i64,
+        error: Option<&str>,
+        permanent: bool,
+    ) -> Result<()> {
+        self.with(|db| {
+            if let Some(error) = error {
+                db.execute(
+                    "UPDATE outbox
+                     SET state=CASE WHEN ?4 OR attempts>=?5 THEN 'failed' ELSE 'pending' END,
+                         last_error=?3,next_attempt_at=?6
+                     WHERE user_id=?1 AND id=?2 AND state='sending'",
+                    params![
+                        user, id, error, permanent, MAX_DELIVERY_ATTEMPTS,
+                        chrono::Utc::now().timestamp() + 30,
+                    ],
+                )?;
+            } else {
+                db.execute(
+                    "UPDATE outbox SET state='delivered',delivered_at=?3
+                     WHERE user_id=?1 AND id=?2 AND state='sending'",
+                    params![user, id, chrono::Utc::now().timestamp()],
+                )?;
+            }
+            Ok(())
+        })
     }
 }
+
 impl StateDb {
     pub(crate) fn commit_answer(
         &self,

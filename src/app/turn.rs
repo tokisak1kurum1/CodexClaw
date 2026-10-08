@@ -112,7 +112,13 @@ impl App {
               },
               Some(ExecutionUpdate::TurnStarted{thread_id,turn_id})=>{self.active_turns.lock().await.bind(user,&thread_id,Some(&turn_id));},
               Some(ExecutionUpdate::ToolCall{display})=>{if settings.verbose{let _=self.reply_text(user,&message.message_id,&display).await;}},
-              Some(ExecutionUpdate::AgentMessage{..})=>{},None=>{}
+              Some(ExecutionUpdate::AgentMessage{text,phase})=>{
+               if phase.as_deref()==Some("commentary"){
+                if let Err(error)=self.reply_text(user,&message.message_id,&text).await{
+                 tracing::warn!(user=%user,%error,"failed to deliver live commentary");
+                }
+               }
+              },None=>{}
              }
             }
         };
@@ -190,9 +196,17 @@ impl App {
                 }
             }
             let parsed = parse_output(&final_text, &expected.workspace_dir);
+            let directives = super::outgoing::prepare_directives(
+                &self.session.user_root(user),
+                &self.session.workspace_for(user),
+                self.session.codex_home(),
+                thread.as_deref(),
+                parsed.directives,
+                self.config.attachments.max_file_bytes,
+            )?;
             let payload = Delivery {
                 text: parsed.text,
-                directives: parsed.directives,
+                directives,
             };
             self.state.commit_answer(
                 user,

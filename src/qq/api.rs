@@ -227,6 +227,26 @@ impl QqApiError {
     }
 }
 
+fn is_expired_passive_reply(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<QqApiError>().is_some_and(|e| {
+        matches!(e.code, Some(40034128 | 40034129))
+            || e.message.contains("被动回复时间或者次数超过限制")
+    })
+}
+
+pub(crate) fn is_permanent_delivery_error(error: &anyhow::Error) -> bool {
+    if let Some(qq) = error.downcast_ref::<QqApiError>() {
+        return qq.status.is_client_error() && qq.status != StatusCode::TOO_MANY_REQUESTS;
+    }
+    let message = error.to_string();
+    message.contains("attachment is outside")
+        || message.contains("generated image does not belong")
+        || message.contains("attachment is not a regular file")
+        || message.contains("attachment exceeds")
+        || message.contains("proactive file delivery requires")
+        || message.contains("no recent message for media")
+}
+
 impl QqApiClient {
     pub fn new(config: QqConfig) -> Result<Self> {
         let client = Client::builder()
@@ -299,6 +319,11 @@ impl QqApiClient {
             {
                 Ok(_) => {}
                 Err(err) => {
+                    // Expired/over-quota passive replies cannot be repaired by
+                    // changing Markdown into text, and repeating consumes quota.
+                    if is_expired_passive_reply(&err) {
+                        return Err(err);
+                    }
                     warn!(
                         error = %err,
                         "qq markdown message rejected; falling back to plain text"

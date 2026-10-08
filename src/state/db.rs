@@ -21,6 +21,7 @@ impl StateDb {
         )?;
         db.execute_batch(super::schema::SCHEMA)?;
         ensure_memory_cursor_columns(&db)?;
+        ensure_outbox_progress_columns(&db)?;
         // Trigram supports Chinese substrings; standard FTS5 plus LIKE is the fallback.
         if db.execute_batch("CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(content,content='messages',content_rowid='id',tokenize='trigram');").is_err(){
    db.execute_batch("CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(content,content='messages',content_rowid='id');")?;
@@ -41,7 +42,7 @@ impl StateDb {
         }
     }
     pub fn recover(&self) -> Result<()> {
-        self.with(|db|{db.execute_batch("UPDATE inbox SET state='pending',started_at=NULL WHERE state='running'; UPDATE outbox SET state='pending',last_error='restart during delivery; possible duplicate' WHERE state='sending'; UPDATE scheduled_runs SET state='failed',finished_at=strftime('%s','now'),last_error='restart during scheduled execution; not replayed' WHERE state='running'; UPDATE memory_cursors SET pending=0;").context("recover durable state")?;Ok(())})
+        self.with(|db|{db.execute_batch("UPDATE inbox SET state='pending',started_at=NULL WHERE state='running'; UPDATE outbox SET state='paused',last_error='restart during delivery; delivery status uncertain' WHERE state='sending'; UPDATE scheduled_runs SET state='failed',finished_at=strftime('%s','now'),last_error='restart during scheduled execution; not replayed' WHERE state='running'; UPDATE memory_cursors SET pending=0;").context("recover durable state")?;Ok(())})
     }
 }
 
@@ -69,6 +70,21 @@ fn ensure_memory_cursor_columns(db: &Connection) -> Result<()> {
             found
         };
         if !exists {
+            db.execute(ddl, [])?;
+        }
+    }
+    Ok(())
+}
+
+fn ensure_outbox_progress_columns(db: &Connection) -> Result<()> {
+    for (column, ddl) in [
+        ("text_sent", "ALTER TABLE outbox ADD COLUMN text_sent INTEGER NOT NULL DEFAULT 0"),
+        ("directives_sent", "ALTER TABLE outbox ADD COLUMN directives_sent INTEGER NOT NULL DEFAULT 0"),
+    ] {
+        let mut stmt = db.prepare("PRAGMA table_info(outbox)")?;
+        let cols = stmt.query_map([], |r| r.get::<_, String>(1))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        if !cols.iter().any(|c| c == column) {
             db.execute(ddl, [])?;
         }
     }

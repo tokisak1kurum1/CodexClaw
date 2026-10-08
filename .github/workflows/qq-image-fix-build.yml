@@ -1,0 +1,35 @@
+name: One-shot QQ image delivery verification
+
+on:
+  push:
+    branches:
+      - build/qq-image-fix-20261008
+
+permissions:
+  contents: write
+
+jobs:
+  verify-and-build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run tests
+        run: CARGO_INCREMENTAL=0 cargo test --locked --jobs 2
+      - name: Build Linux release
+        run: CARGO_INCREMENTAL=0 cargo build --release --locked --jobs 2
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-claw-qq-image-fix-linux-x86_64
+          path: target/release/codex-claw
+          retention-days: 3
+          if-no-files-found: error
+      - name: Publish temporary deployment binary
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create qq-image-fix-20261008 target/release/codex-claw#codex-claw-linux-x86_64 \
+            --title "QQ image delivery fix (temporary build)" \
+            --notes "Verified release binary for deployment. Built from temporary verification branch." \
+            --target "$GITHUB_SHA"
