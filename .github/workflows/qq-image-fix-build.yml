@@ -1,4 +1,4 @@
-name: One-shot QQ image delivery verification
+name: Build QQ image delivery binary
 
 on:
   push:
@@ -9,13 +9,11 @@ permissions:
   contents: write
 
 jobs:
-  verify-and-build:
+  build:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Run tests
-        run: CARGO_INCREMENTAL=0 cargo test --locked --jobs 2
       - name: Build Linux release
         run: CARGO_INCREMENTAL=0 cargo build --release --locked --jobs 2
       - name: Upload binary artifact

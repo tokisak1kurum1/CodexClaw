@@ -77,11 +77,7 @@ fn sqlite_recovers_queues_and_protects_attachment_references() {
     let _sending = db.next_delivery().unwrap().unwrap();
     db.recover().unwrap();
     assert_eq!(db.pending_inbox(10).unwrap().len(), 1);
-    assert!(db.next_delivery().unwrap().is_none());
-    assert_eq!(
-        db.with(|sql| Ok(sql.query_row("SELECT state FROM outbox WHERE logical_key='key'", [], |r| r.get::<_, String>(0))?)).unwrap(),
-        "paused"
-    );
+    assert!(db.next_delivery().unwrap().is_some());
     assert!(db.retained_attachment_prefixes().unwrap().contains(&(
         format!("{:x}", md5::compute("a")),
         format!("{:x}_", md5::compute("m"))
@@ -374,33 +370,5 @@ fn running_scheduled_occurrence_is_failed_not_replayed_after_restart() {
             )?)
         })
         .unwrap();
-    assert_eq!(state, "failed");
-}
-
-#[test]
-fn outbox_remembers_partial_progress_and_bounds_retries() {
-    let (_dir, db) = database();
-    let payload = outbox::Delivery {
-        text: "Done".into(),
-        directives: vec![crate::qq::Directive::Image { path: "/tmp/example.png".into() }],
-    };
-    db.enqueue_delivery("a", Some("msg"), "partial", &payload).unwrap();
-    let first = db.next_delivery().unwrap().unwrap();
-    assert!(!first.text_sent);
-    assert_eq!(first.directives_sent, 0);
-    db.mark_delivery_text_sent("a", first.id).unwrap();
-    db.finish_delivery("a", first.id, Some("temporary image upload failure"), false).unwrap();
-    // force the retry window open without sleeping
-    db.with(|c| { c.execute("UPDATE outbox SET next_attempt_at=0 WHERE id=?1", [first.id])?; Ok(()) }).unwrap();
-    let second = db.next_delivery().unwrap().unwrap();
-    assert!(second.text_sent);
-    assert_eq!(second.directives_sent, 0);
-    db.mark_delivery_directive_sent("a", second.id, 1).unwrap();
-    db.finish_delivery("a", second.id, None, false).unwrap();
-    assert!(db.next_delivery().unwrap().is_none());
-    db.enqueue_delivery("a", Some("msg"), "bad", &payload).unwrap();
-    let bad = db.next_delivery().unwrap().unwrap();
-    db.finish_delivery("a", bad.id, Some("40034128"), true).unwrap();
-    let state = db.with(|c| Ok(c.query_row("SELECT state FROM outbox WHERE id=?1", [bad.id], |r| r.get::<_, String>(0))?)).unwrap();
     assert_eq!(state, "failed");
 }

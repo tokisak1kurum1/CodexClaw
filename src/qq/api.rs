@@ -1054,7 +1054,7 @@ mod tests {
     };
 
     use super::{
-        CHUNKED_UPLOAD_THRESHOLD_BYTES, MsgSeqCache, QqApiClient, QqConfig, SendTextBody,
+        CHUNKED_UPLOAD_THRESHOLD_BYTES, MsgSeqCache, QqApiClient, QqConfig,
         estimate_text_chunk_count, normalized_upload_file_name, should_use_chunked_upload,
         split_text,
     };
@@ -1066,7 +1066,6 @@ mod tests {
             app_secret: "secret".into(),
             api_base_url: server.uri(),
             token_url: format!("{}/token", server.uri()),
-            allowed_users: Vec::new(),
         })
         .unwrap()
     }

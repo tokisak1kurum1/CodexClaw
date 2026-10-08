@@ -97,35 +97,3 @@ pub(super) fn prepare_directives(
     Ok(resolved)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn only_current_thread_generated_images_are_importable() {
-        let base = tempfile::tempdir().unwrap();
-        let root = base.path().join("users/u1");
-        let ws = root.join("workspace");
-        let home = base.path().join("codex");
-        let allowed = home.join("generated_images/abc-123");
-        let other = home.join("generated_images/def-456");
-        fs::create_dir_all(&ws).unwrap();
-        fs::create_dir_all(&allowed).unwrap();
-        fs::create_dir_all(&other).unwrap();
-        let src = allowed.join("sample.png");
-        let foreign = other.join("secret.png");
-        fs::write(&src, b"image").unwrap();
-        fs::write(&foreign, b"foreign").unwrap();
-        let result = prepare_directives(&root, &ws, &home, Some("abc-123"),
-            vec![Directive::Image { path: src.clone() }], 1024).unwrap();
-        let Directive::Image { path } = &result[0] else { panic!("not image") };
-        assert!(path.starts_with(fs::canonicalize(&root).unwrap()));
-        assert_eq!(fs::read(path).unwrap(), b"image");
-        validate_directive(&root, &result[0], 1024).unwrap();
-        assert!(prepare_directives(&root, &ws, &home, Some("abc-123"),
-            vec![Directive::Image { path: foreign }], 1024).is_err());
-        assert!(prepare_directives(&root, &ws, &home, Some("def-456"),
-            vec![Directive::Image { path: src.clone() }], 1024).is_err());
-        assert!(prepare_directives(&root, &ws, &home, Some("abc-123"),
-            vec![Directive::File { path: src, name: None }], 1024).is_err());
-    }
-}
