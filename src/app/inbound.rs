@@ -526,12 +526,53 @@ pub(super) fn spawn_outbox(app: Arc<App>) {
         loop {
             match app.state.next_delivery() {
                 Ok(Some(row)) => {
-                    let result=async{if !row.payload.text.is_empty(){if let Some(reply)=&row.reply_to{if let Err(e)=app.qq_client.send_markdown(&row.user,reply,&row.payload.text).await{tracing::warn!(error=%e,"passive delivery failed; trying proactive delivery, possible duplicate");app.qq_client.send_markdown_proactive(&row.user,&row.payload.text).await?;}}else{app.qq_client.send_markdown_proactive(&row.user,&row.payload.text).await?;}}for directive in row.payload.directives{let reply=row.reply_to.as_deref().ok_or_else(||anyhow::anyhow!("proactive file delivery requires a recent user message"))?;app.send_directive(&row.user,reply,directive).await?;}Ok::<_,anyhow::Error>(())}.await;
-                    let _ = app.state.finish_delivery(
+                    // Validate EVERY attachment before sending text. An invalid
+                    // generated-image path must never cause text-only spam.
+                    let result: Result<()> = async {
+                        for directive in &row.payload.directives {
+                            super::outgoing::validate_directive(
+                                &app.session.user_root(&row.user),
+                                directive,
+                                app.config.attachments.max_file_bytes,
+                            )?;
+                        }
+                        if !row.payload.directives.is_empty() && row.reply_to.is_none() {
+                            anyhow::bail!("proactive file delivery requires a recent user message");
+                        }
+                        if !row.payload.text.is_empty() && !row.text_sent {
+                            if let Some(reply) = &row.reply_to {
+                                app.qq_client.send_markdown(
+                                    &row.user, reply, &row.payload.text
+                                ).await?;
+                            } else {
+                                app.qq_client.send_markdown_proactive(
+                                    &row.user, &row.payload.text
+                                ).await?;
+                            }
+                            app.state.mark_delivery_text_sent(&row.user, row.id)?;
+                        }
+                        for (index, directive) in row.payload.directives.iter().enumerate().skip(row.directives_sent) {
+                            let reply = row.reply_to.as_deref().ok_or_else(|| {
+                                anyhow::anyhow!("proactive file delivery requires a recent user message")
+                            })?;
+                            app.send_directive(&row.user, reply, directive.clone()).await?;
+                            app.state.mark_delivery_directive_sent(&row.user, row.id, index + 1)?;
+                        }
+                        Ok(())
+                    }.await;
+                    let permanent = result.as_ref().err()
+                        .is_some_and(crate::qq::is_permanent_delivery_error);
+                    if let Err(err) = &result {
+                        tracing::warn!(error=%err, permanent, "QQ outbox delivery failed");
+                    }
+                    if let Err(err) = app.state.finish_delivery(
                         &row.user,
                         row.id,
                         result.as_ref().err().map(|e| e.to_string()).as_deref(),
-                    );
+                        permanent,
+                    ) {
+                        tracing::error!(error=%err, "failed to persist QQ outbox result");
+                    }
                 }
                 Ok(None) => tokio::time::sleep(Duration::from_secs(1)).await,
                 Err(e) => {

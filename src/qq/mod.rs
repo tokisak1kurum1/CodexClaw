@@ -7,6 +7,7 @@ pub(crate) mod types;
 // import `crate::qq::X` instead of spelling out the submodule layout. The `pub`
 // group is what the binary wires up; the rest is crate-internal.
 pub use api::QqApiClient;
+pub(crate) use api::is_permanent_delivery_error;
 pub use gateway::spawn_gateway;
 pub use types::C2CMessageEvent;
 

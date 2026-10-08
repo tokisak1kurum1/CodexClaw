@@ -2,6 +2,7 @@ mod active_turns;
 mod approvals;
 mod format;
 mod inbound;
+mod outgoing;
 mod turn;
 use crate::{
     codex::{ApprovalOutcome, CodexExecutor},
@@ -95,11 +96,12 @@ impl App {
             Directive::File { path, name } => (path, name, 4),
         };
         let root = self.session.user_root(user);
+        let directive = match kind {
+            1 => Directive::Image { path: path.clone() },
+            _ => Directive::File { path: path.clone(), name: name.clone() },
+        };
+        outgoing::validate_directive(&root, &directive, self.config.attachments.max_file_bytes)?;
         let canonical = std::fs::canonicalize(&path)?;
-        anyhow::ensure!(
-            canonical.starts_with(std::fs::canonicalize(root)?),
-            "attachment is outside this user's directories"
-        );
         let uploaded = self
             .qq_client
             .upload_file(user, &canonical, kind, name.as_deref())

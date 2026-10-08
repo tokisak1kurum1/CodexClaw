@@ -95,8 +95,14 @@ pub(crate) fn translate_item_completed(
                 trace!(item_id = %id, "duplicate agent item/completed ignored");
                 return Vec::new();
             }
-            state.agent_text_parts.push(text.clone());
-            return vec![ExecutionUpdate::AgentMessage { text }];
+            let phase = notif.item.phase.clone();
+            // Commentary is delivered live by the app layer. Keep only the
+            // final-phase text in the eventual ExecutionResult so the final
+            // outbox delivery does not repeat progress messages.
+            if phase.as_deref() != Some("commentary") {
+                state.agent_text_parts.push(text.clone());
+            }
+            return vec![ExecutionUpdate::AgentMessage { text, phase }];
         }
         return Vec::new();
     }
@@ -436,10 +442,31 @@ mod tests {
         let updates = translate_item_completed(&mut state, &item);
         assert_eq!(updates.len(), 1);
         match &updates[0] {
-            ExecutionUpdate::AgentMessage { text } => assert_eq!(text, "Hello world"),
+            ExecutionUpdate::AgentMessage { text, phase } => {
+                assert_eq!(text, "Hello world");
+                assert_eq!(phase.as_deref(), Some("final"));
+            },
             _ => panic!("expected AgentMessage"),
         }
         assert_eq!(state.agent_text_parts, vec!["Hello world"]);
+    }
+
+    #[test]
+    fn commentary_agent_message_streams_but_is_not_part_of_final_text() {
+        let item = make_item(json!({
+            "id":"m-commentary","type":"agentMessage","text":"Working on it","phase":"commentary"
+        }));
+        let mut state = TurnState::default();
+        let updates = translate_item_completed(&mut state, &item);
+        assert_eq!(updates.len(), 1);
+        match &updates[0] {
+            ExecutionUpdate::AgentMessage { text, phase } => {
+                assert_eq!(text, "Working on it");
+                assert_eq!(phase.as_deref(), Some("commentary"));
+            }
+            _ => panic!("expected AgentMessage"),
+        }
+        assert!(state.agent_text_parts.is_empty());
     }
 
     #[test]
